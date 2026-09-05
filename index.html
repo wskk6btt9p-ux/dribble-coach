@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#070707"><meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Dribble Coach">
+<link rel="manifest" href="manifest.json">
+<title>Dribble Coach</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#070707;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.app{max-width:760px;margin:auto;padding:14px;padding-bottom:30px}.head{display:flex;justify-content:space-between;align-items:center;margin:4px 0 12px}
+h1{font-size:27px;margin:0}.muted{color:#999;font-size:12px}.stage{position:relative;width:100%;aspect-ratio:3/4;background:#111;border-radius:22px;overflow:hidden}
+video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}canvas{z-index:2}
+.badge{position:absolute;z-index:3;top:12px;left:12px;background:#000b;border-radius:14px;padding:9px 12px;font-weight:800}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-top:10px}.card{background:#151515;border-radius:17px;padding:13px}.label{font-size:11px;color:#888}.num{font-size:25px;font-weight:850;margin-top:3px}
+.feedback{margin-top:10px;background:#151515;border-radius:17px;padding:15px;font-weight:700;min-height:55px}
+button,select{border:0;border-radius:15px;padding:14px;font-size:16px;font-weight:800;width:100%}button{background:#fff;color:#000}.secondary{background:#222;color:#fff}.controls{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}
+.small{margin-top:10px;color:#777;font-size:11px;line-height:1.5;text-align:center}
+</style></head>
+<body><div class="app">
+<div class="head"><div><h1>🏀 Dribble Coach</h1><div class="muted">Live iPhone camera training</div></div><div id="state">OFF</div></div>
+<div class="stage"><video id="video" playsinline muted></video><canvas id="canvas"></canvas><div class="badge" id="status">Camera off</div></div>
+<div class="grid">
+<div class="card"><div class="label">DRIBBLES / MIN</div><div class="num" id="rpm">—</div></div>
+<div class="card"><div class="label">HAND</div><div class="num" id="hand">—</div></div>
+<div class="card"><div class="label">FORM SCORE</div><div class="num" id="score">—</div></div>
+<div class="card"><div class="label">SESSION</div><div class="num" id="time">0:00</div></div>
+</div>
+<div class="feedback" id="feedback">Start the camera and keep your hand + ball visible.</div>
+<div class="controls"><button id="start">Start Camera</button><button id="stop" class="secondary" disabled>Stop</button></div>
+<div class="controls"><select id="mode"><option value="pound">Pound Dribble</option><option value="low">Low Dribble</option><option value="crossover">Crossover</option></select><button id="reset" class="secondary">Reset</button></div>
+<div class="small">For best tracking: prop the phone up, use good lighting, and stand 6–10 ft away. Camera processing happens in the browser.</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script>
+const v=document.getElementById('video'),c=document.getElementById('canvas'),x=c.getContext('2d');
+const status=document.getElementById('status'),feedback=document.getElementById('feedback');
+let running=false,cam=null,lastY=null,lastDir=0,lastBounce=0,times=[],score=100,startTime=0,timer=null;
+
+const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+hands.setOptions({maxNumHands:2,modelComplexity:1,minDetectionConfidence:.55,minTrackingConfidence:.55});
+hands.onResults(r=>{
+ if(!running)return;
+ c.width=v.videoWidth||720;c.height=v.videoHeight||960;x.clearRect(0,0,c.width,c.height);
+ let lm=r.multiHandLandmarks?.[0], y=null;
+ if(lm){drawConnectors(x,lm,HAND_CONNECTIONS,{color:'#00ff99',lineWidth:4});drawLandmarks(x,lm,{color:'#fff',lineWidth:2,radius:3});y=lm[0].y;
+ document.getElementById('hand').textContent=r.multiHandedness?.[0]?.label||'Hand';status.textContent='Tracking';}
+ else {status.textContent='Find hand…';feedback.textContent='Move your hand into view.';return}
+ const now=performance.now();
+ if(lastY!==null){
+  const dy=y-lastY;const dir=dy>.012?1:dy<-.012?-1:lastDir;
+  if(lastDir===1&&dir===-1&&now-lastBounce>180){
+   lastBounce=now;times.push(now);times=times.filter(t=>now-t<60000);
+   document.getElementById('rpm').textContent=times.length;
+  }
+  lastDir=dir;
+  let s=100,msg='Good control. Keep the rhythm steady.';
+  const mode=document.getElementById('mode').value;
+  if(mode==='low'&&y<.30){s=82;msg='Go lower. Keep the ball around knee height.'}
+  if(mode==='pound'&&y>.64){s=80;msg='Push harder and keep your hand working below your waist.'}
+  if(Math.abs(dy)>.08){s-=8;msg='Slow down slightly. Stay controlled.'}
+  score=Math.round(score*.85+s*.15);document.getElementById('score').textContent=score;
+  feedback.textContent=score>=90?'✓ '+msg:'• '+msg;
+ }
+ lastY=y;
+});
+start.onclick=async()=>{
+ try{
+  const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:1920}},audio:false});
+  v.srcObject=stream;await v.play();running=true;startTime=Date.now();
+  cam=new Camera(v,{onFrame:async()=>hands.send({image:v}),width:1280,height:1920});cam.start();
+  start.disabled=true;stop.disabled=false;state.textContent='ON';status.textContent='Tracking…';
+  timer=setInterval(()=>{let s=Math.floor((Date.now()-startTime)/1000);time.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0')},500);
+ }catch(e){status.textContent='Camera blocked';feedback.textContent='Allow camera access for Safari, then try again.'}
+};
+stop.onclick=()=>{running=false;if(cam)cam.stop();if(v.srcObject)v.srcObject.getTracks().forEach(t=>t.stop());v.srcObject=null;start.disabled=false;stop.disabled=true;state.textContent='OFF';status.textContent='Camera off';clearInterval(timer)};
+reset.onclick=()=>{times=[];lastY=null;lastDir=0;score=100;rpm.textContent='—';document.getElementById('score').textContent='—';time.textContent='0:00';feedback.textContent='Session reset.'};
+</script></body></html>

@@ -1,0 +1,9 @@
+{
+  "name": "Dribble Coach",
+  "short_name": "Dribble Coach",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#070707",
+  "theme_color": "#070707",
+  "description": "Live basketball dribble training with iPhone camera."
+}
