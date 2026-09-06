@@ -10,7 +10,7 @@
 *{box-sizing:border-box}body{margin:0;background:#070707;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 .app{max-width:760px;margin:auto;padding:14px;padding-bottom:30px}.head{display:flex;justify-content:space-between;align-items:center;margin:4px 0 12px}
 h1{font-size:27px;margin:0}.muted{color:#999;font-size:12px}.stage{position:relative;width:100%;aspect-ratio:3/4;background:#111;border-radius:22px;overflow:hidden}
-video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}canvas{z-index:2}
+video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}canvas{z-index:2}
 .badge{position:absolute;z-index:3;top:12px;left:12px;background:#000b;border-radius:14px;padding:9px 12px;font-weight:800}
 .badge2{position:absolute;z-index:3;top:12px;right:12px;background:#000b;border-radius:14px;padding:9px 12px;font-weight:800;font-size:13px}
 .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-top:10px}.card{background:#151515;border-radius:17px;padding:13px}.label{font-size:11px;color:#888}.num{font-size:25px;font-weight:850;margin-top:3px}
@@ -241,7 +241,7 @@ function loop(){
 /* ---------- controls ---------- */
 start.onclick=async()=>{
  try{
-  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:1920}},audio:false});
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1280},height:{ideal:1920}},audio:false});
   v.srcObject=stream;await v.play();
   running=true;startTime=Date.now();
   start.disabled=true;stop.disabled=false;state.textContent='ON';status.textContent='Tracking…';
