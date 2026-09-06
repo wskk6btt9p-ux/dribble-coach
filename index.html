@@ -23,7 +23,7 @@ button,select{border:0;border-radius:15px;padding:14px;font-size:16px;font-weigh
 <div class="stage"><video id="video" playsinline muted></video><canvas id="canvas"></canvas><div class="badge" id="status">Camera off</div><div class="badge2" id="predBadge"></div></div>
 <div class="grid">
 <div class="card"><div class="label">DRIBBLES / MIN</div><div class="num" id="rpm">—</div></div>
-<div class="card"><div class="label">HAND</div><div class="num" id="hand">—</div></div>
+<div class="card"><div class="label">BALL</div><div class="num" id="hand">—</div></div>
 <div class="card"><div class="label">FORM SCORE</div><div class="num" id="score">—</div></div>
 <div class="card"><div class="label">SESSION</div><div class="num" id="time">0:00</div></div>
 <div class="card"><div class="label">LAST MOVE</div><div class="num" id="lastMove">—</div></div>
@@ -35,7 +35,7 @@ button,select{border:0;border-radius:15px;padding:14px;font-size:16px;font-weigh
 <div class="small">For best tracking: prop the phone up, use good lighting, and stand 6–10 ft away so your full body is visible. Camera processing happens in the browser.</div>
 </div>
 <script type="module">
-import { PoseLandmarker, HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
 const v=document.getElementById('video'),c=document.getElementById('canvas'),x=c.getContext('2d');
 const status=document.getElementById('status'),feedback=document.getElementById('feedback'),predBadge=document.getElementById('predBadge');
@@ -47,7 +47,7 @@ let moveCount=0;
 const POSE_CONNECTIONS=[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],
  [23,25],[25,27],[24,26],[26,28],[27,29],[27,31],[28,30],[28,32],[15,17],[15,19],[15,21],[16,18],[16,20],[16,22]];
 const HAND_CONNECTIONS=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
- [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+ [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]]; // kept for reference, unused now that hand tracking is off
 
 /* ---------- predictive smoothing / occlusion filter ----------
    Constant-velocity estimator per landmark. On every real detection it
@@ -135,17 +135,13 @@ function drawBall(ballPt){
 }
 
 /* ---------- model setup ---------- */
-let poseLandmarker=null, handLandmarker=null, ready=false;
+let poseLandmarker=null, ready=false;
 async function initModels(){
  status.textContent='Loading models…';
  const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
  poseLandmarker=await PoseLandmarker.createFromOptions(vision,{
   baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",delegate:"GPU"},
   runningMode:"VIDEO",numPoses:1
- });
- handLandmarker=await HandLandmarker.createFromOptions(vision,{
-  baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate:"GPU"},
-  runningMode:"VIDEO",numHands:2
  });
  ready=true;
  status.textContent='Models ready';
@@ -207,7 +203,6 @@ function loop(){
 
  if(ready && v.readyState>=2){
   const poseRes=poseLandmarker.detectForVideo(v,now);
-  const handRes=handLandmarker.detectForVideo(v,now);
 
   const poseLm=poseRes.landmarks?.[0]||null;
   const poseIdx=[11,12,13,14,15,16,23,24,25,26,27,28];
@@ -229,38 +224,12 @@ function loop(){
   P('ball').update(ballSeen?ballSeen.x:undefined, ballSeen?ballSeen.y:undefined, now, !!ballSeen);
   const ballPt=P('ball').get();
 
-  // hands: of the (up to 2) hands MediaPipe finds, only track whichever one
-  // is closest to the ball right now - the other hand is ignored entirely,
-  // so it never gets drawn and never feeds into dribble/rep logic
-  const handCandidates=handRes.landmarks||[];
-  const handednessCandidates=handRes.handedness||[];
-  let chosenIdx=-1;
-  if(handCandidates.length){
-   if(ballPt){
-    let best=Infinity;
-    handCandidates.forEach((lm,i)=>{
-     const d=Math.hypot(lm[9].x-ballPt.x, lm[9].y-ballPt.y);
-     if(d<best){best=d;chosenIdx=i;}
-    });
-   } else chosenIdx=0;
-  }
-  const handLm = chosenIdx>=0 ? handCandidates[chosenIdx] : null;
-  let handLabel = chosenIdx>=0 ? (handednessCandidates[chosenIdx]?.[0]?.categoryName||null) : null;
-  const handArr=new Array(21).fill(null);
-  if(handLm){
-   for(let i=0;i<21;i++) P('hand'+i).update(handLm[i].x,handLm[i].y,now,true);
-  } else {
-   for(let i=0;i<21;i++) P('hand'+i).update(undefined,undefined,now,false);
-  }
-  for(let i=0;i<21;i++) handArr[i]=P('hand'+i).get();
-
   drawSkeleton(poseArr, POSE_CONNECTIONS, '#3aa0ff', '#3aa0ff88');
-  if(handArr[0]) drawSkeleton(handArr, HAND_CONNECTIONS, '#00ff99', '#ffd54a');
   if(ballPt) drawBall(ballPt);
 
-  // the ball - not the hand - drives dribble reps, height checks, and move detection
+  // the ball alone drives dribble reps, height checks, and move detection
   let tracked = ballPt;
-  anyPredicted = (tracked && !tracked.live) || (handArr[0] && !handArr[0].live);
+  anyPredicted = tracked && !tracked.live;
 
   const ls=poseArr[11],rs=poseArr[12],lh=poseArr[23],rh=poseArr[24],lk=poseArr[25],rk=poseArr[26];
   let bodyFrame=null;
@@ -272,7 +241,7 @@ function loop(){
 
   if(tracked){
    status.textContent = anyPredicted ? 'Tracking ball (predicted)' : 'Tracking ball';
-   document.getElementById('hand').textContent = handLabel || '—';
+   document.getElementById('hand').textContent = anyPredicted ? 'Predicted' : 'Live';
    const y=tracked.y;
    if(lastY!==null){
     const dy=y-lastY;
@@ -335,6 +304,7 @@ stop.onclick=()=>{
 reset.onclick=()=>{
  times=[];lastY=null;lastDir=0;score=100;moveCount=0;sideState=null;moveState='neutral';
  rpm.textContent='—';document.getElementById('score').textContent='—';time.textContent='0:00';
+ document.getElementById('hand').textContent='—';
  document.getElementById('lastMove').textContent='—';document.getElementById('moveCount').textContent='0';
  feedback.textContent='Session reset.';
 };
