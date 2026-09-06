@@ -345,6 +345,7 @@ function loop(){
 start.onclick=async()=>{
  try{
   stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1280},height:{ideal:1920},frameRate:{ideal:60,max:60}},audio:false});
+   try{const track=stream.getVideoTracks()[0], caps=track.getCapabilities?.(); if(caps?.zoom){const z=Math.max(caps.zoom.min, Math.min(0.5,caps.zoom.max)); await track.applyConstraints({advanced:[{zoom:z}]});}}catch(e){console.warn('0.5x zoom not supported on this camera',e);}
   v.srcObject=stream;await v.play();
   running=true;startTime=Date.now();
   start.disabled=true;stop.disabled=false;state.textContent='ON';status.textContent='Tracking…';
