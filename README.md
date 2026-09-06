@@ -1,1 +1,1 @@
-# dribble-coach 0.70 BETA
+# dribble-coachBETA
