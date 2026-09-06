@@ -75,20 +75,31 @@ class PointPredictor{
   this.t=t;
  }
  get(){ if(this.x===null) return null; return {x:this.x,y:this.y,live:this.visible}; }
+ // Forward-projects the current filtered position by leadMs of velocity.
+ // Detection always lags the real world by a frame or two; rendering a
+ // little ahead of the last sample - rather than exactly at it - is what
+ // makes tracking feel like zero delay instead of always catching up.
+ predict(leadMs){
+  if(this.x===null) return null;
+  const lead=leadMs/1000;
+  return {x:this.x+this.vx*lead, y:this.y+this.vy*lead, live:this.visible};
+ }
 }
 const pts={}; // lazily created PointPredictor per landmark key
 function P(key){ return pts[key] || (pts[key]=new PointPredictor()); }
+const BALL_LOOKAHEAD_MS=70; // how far ahead of the last real detection to render the ball
 
 /* ---------- ball tracking (color-blob detector) ----------
-   Lightweight orange-ball detector: downsamples the current video frame
-   to a small offscreen canvas, classifies pixels by hue/saturation, and
-   takes the centroid of the matching blob as the ball position. This
-   runs every frame with no extra model load and feeds the same
+   Downsamples the current video frame to a small offscreen canvas,
+   finds every connected blob matching a basketball-orange hue/saturation
+   range, then filters candidates by size, solidity (fill ratio) and
+   roundness (aspect ratio) - a ball is a compact, filled circle, while a
+   hand or forearm (which can share a similar hue under warm lighting) is
+   thin/elongated and less solid. Among the surviving candidates it favors
+   whichever is closest to where the ball was last seen, so it doesn't
+   jump to a hand passing through frame. The result feeds the same
    PointPredictor used for skeleton points, so the ball also gets
-   predictive smoothing and survives brief occlusion (e.g. hidden behind
-   a hand or the body mid-move). Tuned for a standard orange basketball;
-   if your lighting/ball color is very different, widen the hue range
-   in isOrange(). */
+   predictive smoothing and survives brief occlusion. */
 let ballRadius=0.03;
 const ballCanvas=document.createElement('canvas');
 const ballCtx=ballCanvas.getContext('2d',{willReadFrequently:true});
@@ -104,26 +115,56 @@ function isOrange(r,g,b){
  else h=60*((r-g)/d+4);
  if(h<0) h+=360;
  const sat=d/max;
- return h>=4 && h<=38 && sat>0.4 && max>75;
+ return h>=6 && h<=32 && sat>0.48 && max>75;
 }
-function detectBall(video){
+function detectBall(video, prevBall){
  if(!video.videoWidth) return null;
  const w=BALL_SAMPLE_W, h=Math.max(1,Math.round(BALL_SAMPLE_W*video.videoHeight/video.videoWidth));
  if(ballCanvas.width!==w||ballCanvas.height!==h){ballCanvas.width=w;ballCanvas.height=h;}
  ballCtx.drawImage(video,0,0,w,h);
  let data;
  try{ data=ballCtx.getImageData(0,0,w,h).data; }catch(e){ return null; }
- let sumX=0,sumY=0,count=0;
- for(let py=0;py<h;py++){
-  for(let px=0;px<w;px++){
-   const idx=(py*w+px)*4;
-   if(isOrange(data[idx],data[idx+1],data[idx+2])){ sumX+=px; sumY+=py; count++; }
-  }
+
+ const n=w*h;
+ const mask=new Uint8Array(n);
+ for(let i=0;i<n;i++){
+  const idx=i*4;
+  if(isOrange(data[idx],data[idx+1],data[idx+2])) mask[i]=1;
  }
- const minPixels=Math.max(15, w*h*0.004);
- if(count<minPixels) return null;
- ballRadius=Math.sqrt(count/Math.PI)/w;
- return { x:(sumX/count)/w, y:(sumY/count)/h };
+
+ const visited=new Uint8Array(n);
+ const stack=new Int32Array(n);
+ let best=null, bestScore=-Infinity;
+
+ for(let start=0;start<n;start++){
+  if(!mask[start]||visited[start]) continue;
+  let sp=0; stack[sp++]=start; visited[start]=1;
+  let count=0,sumX=0,sumY=0,minX=w,maxX=0,minY=h,maxY=0;
+  while(sp>0){
+   const p=stack[--sp];
+   const py=(p/w)|0, px=p-py*w;
+   count++; sumX+=px; sumY+=py;
+   if(px<minX)minX=px; if(px>maxX)maxX=px;
+   if(py<minY)minY=py; if(py>maxY)maxY=py;
+   if(px>0){const q=p-1; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
+   if(px<w-1){const q=p+1; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
+   if(py>0){const q=p-w; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
+   if(py<h-1){const q=p+w; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
+  }
+  const bw=maxX-minX+1, bh=maxY-minY+1;
+  const fill=count/(bw*bh);
+  const aspect=Math.max(bw,bh)/Math.max(1,Math.min(bw,bh));
+  if(count<Math.max(12,n*0.003)) continue;   // speck of noise
+  if(bw>w*0.6||bh>h*0.6) continue;           // too big to be just the ball
+  if(fill<0.45) continue;                    // hollow/irregular shape (fingers, edges)
+  if(aspect>1.9) continue;                   // too elongated to be round (arm/forearm)
+  const cx=(sumX/count)/w, cy=(sumY/count)/h;
+  let score=count*fill;
+  if(prevBall) score/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*8);
+  if(score>bestScore){ bestScore=score; best={x:cx,y:cy,r:Math.sqrt(count/Math.PI)/w}; }
+ }
+ if(best) ballRadius=best.r;
+ return best;
 }
 function drawBall(ballPt){
  const r=Math.max(10, ballRadius*c.width);
@@ -218,11 +259,13 @@ function loop(){
   }
   for(const i of poseIdx) poseArr[i]=P('pose'+i).get();
 
-  // ball: detect it every frame, then run it through the same predictor
-  // used for skeleton points so it stays smooth and survives brief occlusion
-  const ballSeen=detectBall(v);
+  // ball: detect it every frame (shape-filtered so a hand/arm can't be
+  // mistaken for the ball), then run it through the predictor and read
+  // it back with a small forward lookahead for a zero-delay feel
+  const prevBall=P('ball').get();
+  const ballSeen=detectBall(v, prevBall);
   P('ball').update(ballSeen?ballSeen.x:undefined, ballSeen?ballSeen.y:undefined, now, !!ballSeen);
-  const ballPt=P('ball').get();
+  const ballPt=P('ball').predict(BALL_LOOKAHEAD_MS);
 
   drawSkeleton(poseArr, POSE_CONNECTIONS, '#3aa0ff', '#3aa0ff88');
   if(ballPt) drawBall(ballPt);
