@@ -87,8 +87,6 @@ class PointPredictor{
 }
 const pts={}; // lazily created PointPredictor per landmark key
 function P(key){ return pts[key] || (pts[key]=new PointPredictor()); }
-const BALL_LOOKAHEAD_MS=70;  // how far ahead of the last real detection to render the ball
-const POSE_LOOKAHEAD_MS=50;  // same idea for the body skeleton
 const BALL_LOCK_REQUIRED=3;  // consecutive real detections needed before we trust/show the ball
 const BALL_LOST_TIMEOUT_MS=1200; // how long without a real detection before we call the ball "lost" and require re-lock
 let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0;
@@ -119,7 +117,7 @@ function isOrange(r,g,b){
  else h=60*((r-g)/d+4);
  if(h<0) h+=360;
  const sat=d/max;
- return h>=6 && h<=30 && sat>0.52 && max>75;
+ return h>=8 && h<=26 && sat>0.55 && max>85;
 }
 function detectBall(video, prevBall){
  if(!video.videoWidth) return null;
@@ -158,10 +156,10 @@ function detectBall(video, prevBall){
   const bw=maxX-minX+1, bh=maxY-minY+1;
   const fill=count/(bw*bh);
   const aspect=Math.max(bw,bh)/Math.max(1,Math.min(bw,bh));
-  if(count<Math.max(12,n*0.003)) continue;   // speck of noise
-  if(bw>w*0.6||bh>h*0.6) continue;           // too big to be just the ball
-  if(fill<0.45) continue;                    // hollow/irregular shape (fingers, edges)
-  if(aspect>1.9) continue;                   // too elongated to be round (arm/forearm)
+  if(count<Math.max(14,n*0.0035)) continue;  // speck of noise
+  if(bw>w*0.5||bh>h*0.5) continue;           // too big to be just the ball
+  if(fill<0.62) continue;                    // faces/hands have low fill (eyes, mouth, gaps between fingers break up the blob) - a ball is solid
+  if(aspect>1.35) continue;                  // must be close to circular - a head/hand can be round-ish but is rarely this round
   const cx=(sumX/count)/w, cy=(sumY/count)/h;
   let score=count*fill;
   if(prevBall) score/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*8);
@@ -238,12 +236,18 @@ function drawSkeleton(landmarks, conns, colorLive, colorPred){
  }
 }
 
+let lastFrameTime=null, avgFrameMs=20; // rolling average of real frame interval - the actual measured latency of this device right now
+
 /* ---------- main render loop ---------- */
 function loop(){
  if(!running){ return; }
- c.width=v.videoWidth||720;c.height=v.videoHeight||960;
+ const vw=v.videoWidth||720, vh=v.videoHeight||960;
+ if(c.width!==vw) c.width=vw;
+ if(c.height!==vh) c.height=vh;
  x.clearRect(0,0,c.width,c.height);
  const now=performance.now();
+ if(lastFrameTime!==null) avgFrameMs = avgFrameMs*0.9 + (now-lastFrameTime)*0.1;
+ lastFrameTime=now;
  let anyPredicted=false;
 
  if(ready && v.readyState>=2){
@@ -261,15 +265,17 @@ function loop(){
   } else {
    for(const i of poseIdx) P('pose'+i).update(undefined,undefined,now,false);
   }
-  for(const i of poseIdx) poseArr[i]=P('pose'+i).predict(POSE_LOOKAHEAD_MS);
+  // body: no forward-lookahead (no ESP) - just the raw filtered position,
+  // so what's drawn is exactly the latest real detection, nothing guessed
+  for(const i of poseIdx) poseArr[i]=P('pose'+i).get();
 
-  // ball: detect it every frame (shape-filtered so a hand/arm can't be
+  // ball: detect it every frame (shape-filtered so a hand/arm/head can't be
   // mistaken for the ball). A real detection must land BALL_LOCK_REQUIRED
   // frames in a row before we trust it and start showing/using it - this
-  // is what stops a single stray hand-colored blob from ever registering
-  // as "the ball" or counting toward a rep. Once locked on, brief misses
-  // (occlusion) are tolerated via the predictor's own decay; only a long
-  // gap (BALL_LOST_TIMEOUT_MS) drops the lock and requires re-acquiring it.
+  // is what stops a single stray blob from ever registering as "the ball"
+  // or counting toward a rep. Once locked on, brief misses (occlusion) are
+  // tolerated via the predictor's own decay; only a long gap
+  // (BALL_LOST_TIMEOUT_MS) drops the lock and requires re-acquiring it.
   const prevBall=P('ball').get();
   const ballSeen=detectBall(v, prevBall);
   if(ballSeen){
@@ -281,7 +287,11 @@ function loop(){
    if(now-ballLastRawSeen>BALL_LOST_TIMEOUT_MS) ballAcquired=false;
   }
   P('ball').update(ballSeen?ballSeen.x:undefined, ballSeen?ballSeen.y:undefined, now, !!ballSeen);
-  const ballPt = ballAcquired ? P('ball').predict(BALL_LOOKAHEAD_MS) : null;
+  // ball keeps ESP - but the lookahead is the device's own measured frame
+  // interval (capped for stability), not a guessed constant. That's the
+  // minimum lookahead that actually cancels real pipeline lag - no more.
+  const ballLookahead=Math.min(avgFrameMs,80);
+  const ballPt = ballAcquired ? P('ball').predict(ballLookahead) : null;
 
   drawSkeleton(poseArr, POSE_CONNECTIONS, '#3aa0ff', '#3aa0ff88');
   if(ballPt) drawBall(ballPt);
@@ -299,7 +309,7 @@ function loop(){
   }
 
   if(tracked){
-   status.textContent = anyPredicted ? 'Tracking ball (predicted)' : 'Tracking ball';
+   status.textContent = (anyPredicted ? 'Tracking ball (predicted)' : 'Tracking ball') + ' · ' + avgFrameMs.toFixed(0) + 'ms';
    document.getElementById('hand').textContent = anyPredicted ? 'Predicted' : 'Live';
    const y=tracked.y;
    if(lastY!==null){
