@@ -87,7 +87,11 @@ class PointPredictor{
 }
 const pts={}; // lazily created PointPredictor per landmark key
 function P(key){ return pts[key] || (pts[key]=new PointPredictor()); }
-const BALL_LOOKAHEAD_MS=70; // how far ahead of the last real detection to render the ball
+const BALL_LOOKAHEAD_MS=70;  // how far ahead of the last real detection to render the ball
+const POSE_LOOKAHEAD_MS=50;  // same idea for the body skeleton
+const BALL_LOCK_REQUIRED=3;  // consecutive real detections needed before we trust/show the ball
+const BALL_LOST_TIMEOUT_MS=1200; // how long without a real detection before we call the ball "lost" and require re-lock
+let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0;
 
 /* ---------- ball tracking (color-blob detector) ----------
    Downsamples the current video frame to a small offscreen canvas,
@@ -115,7 +119,7 @@ function isOrange(r,g,b){
  else h=60*((r-g)/d+4);
  if(h<0) h+=360;
  const sat=d/max;
- return h>=6 && h<=32 && sat>0.48 && max>75;
+ return h>=6 && h<=30 && sat>0.52 && max>75;
 }
 function detectBall(video, prevBall){
  if(!video.videoWidth) return null;
@@ -257,15 +261,27 @@ function loop(){
   } else {
    for(const i of poseIdx) P('pose'+i).update(undefined,undefined,now,false);
   }
-  for(const i of poseIdx) poseArr[i]=P('pose'+i).get();
+  for(const i of poseIdx) poseArr[i]=P('pose'+i).predict(POSE_LOOKAHEAD_MS);
 
   // ball: detect it every frame (shape-filtered so a hand/arm can't be
-  // mistaken for the ball), then run it through the predictor and read
-  // it back with a small forward lookahead for a zero-delay feel
+  // mistaken for the ball). A real detection must land BALL_LOCK_REQUIRED
+  // frames in a row before we trust it and start showing/using it - this
+  // is what stops a single stray hand-colored blob from ever registering
+  // as "the ball" or counting toward a rep. Once locked on, brief misses
+  // (occlusion) are tolerated via the predictor's own decay; only a long
+  // gap (BALL_LOST_TIMEOUT_MS) drops the lock and requires re-acquiring it.
   const prevBall=P('ball').get();
   const ballSeen=detectBall(v, prevBall);
+  if(ballSeen){
+   ballLockStreak++;
+   ballLastRawSeen=now;
+   if(ballLockStreak>=BALL_LOCK_REQUIRED) ballAcquired=true;
+  } else {
+   ballLockStreak=0;
+   if(now-ballLastRawSeen>BALL_LOST_TIMEOUT_MS) ballAcquired=false;
+  }
   P('ball').update(ballSeen?ballSeen.x:undefined, ballSeen?ballSeen.y:undefined, now, !!ballSeen);
-  const ballPt=P('ball').predict(BALL_LOOKAHEAD_MS);
+  const ballPt = ballAcquired ? P('ball').predict(BALL_LOOKAHEAD_MS) : null;
 
   drawSkeleton(poseArr, POSE_CONNECTIONS, '#3aa0ff', '#3aa0ff88');
   if(ballPt) drawBall(ballPt);
@@ -316,7 +332,7 @@ function loop(){
    }
    lastY=y;
   } else {
-   status.textContent='Find the ball…';
+   status.textContent = ballLockStreak>0 ? 'Locking onto ball…' : 'Find the ball…';
    feedback.textContent='Make sure the ball is visible and well lit.';
   }
  }
@@ -328,7 +344,7 @@ function loop(){
 /* ---------- controls ---------- */
 start.onclick=async()=>{
  try{
-  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1280},height:{ideal:1920}},audio:false});
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1280},height:{ideal:1920},frameRate:{ideal:60,max:60}},audio:false});
   v.srcObject=stream;await v.play();
   running=true;startTime=Date.now();
   start.disabled=true;stop.disabled=false;state.textContent='ON';status.textContent='Tracking…';
@@ -346,6 +362,7 @@ stop.onclick=()=>{
 };
 reset.onclick=()=>{
  times=[];lastY=null;lastDir=0;score=100;moveCount=0;sideState=null;moveState='neutral';
+ ballLockStreak=0;ballAcquired=false;ballLastRawSeen=0;
  rpm.textContent='—';document.getElementById('score').textContent='—';time.textContent='0:00';
  document.getElementById('hand').textContent='—';
  document.getElementById('lastMove').textContent='—';document.getElementById('moveCount').textContent='0';
