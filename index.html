@@ -96,29 +96,38 @@ let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0;
    finds every connected blob matching a basketball-orange hue/saturation
    range, then filters candidates by size, solidity (fill ratio) and
    roundness (aspect ratio) - a ball is a compact, filled circle, while a
-   hand or forearm (which can share a similar hue under warm lighting) is
-   thin/elongated and less solid. Among the surviving candidates it favors
-   whichever is closest to where the ball was last seen, so it doesn't
-   jump to a hand passing through frame. The result feeds the same
-   PointPredictor used for skeleton points, so the ball also gets
-   predictive smoothing and survives brief occlusion. */
+   hand, forearm, or head (which can share a similar hue under warm
+   lighting) is thinner/more irregular. Beyond that generic color range,
+   once the ball has been locked onto for a few frames it learns THIS
+   ball's specific average color and starts requiring new candidates to
+   match that learned color too - a much tighter filter than a generic
+   "orange" range, since it's calibrated to the exact ball and lighting
+   in front of the camera rather than orange in general. That's what
+   stops it from re-latching onto skin later even though skin can pass
+   the loose generic gate. Among remaining candidates it also favors
+   whichever is closest to where the ball was last seen. The result
+   feeds the same PointPredictor used for skeleton points, so the ball
+   also gets predictive smoothing and survives brief occlusion. */
 let ballRadius=0.03;
+let learnedColor=null; // {h,s,v} running average of the specific locked-on ball's color
 const ballCanvas=document.createElement('canvas');
 const ballCtx=ballCanvas.getContext('2d',{willReadFrequently:true});
 const BALL_SAMPLE_W=220; // higher res sample so a distant/small ball still gets enough pixels to measure
-function isOrange(r,g,b){
+function classifyPixel(r,g,b){
  const max=Math.max(r,g,b), min=Math.min(r,g,b);
- if(max<60) return false;
+ if(max<60) return null;
  const d=max-min;
- if(d<25) return false;
+ if(d<25) return null;
  let h;
  if(max===r) h=60*(((g-b)/d)%6);
  else if(max===g) h=60*((b-r)/d+2);
  else h=60*((r-g)/d+4);
  if(h<0) h+=360;
  const sat=d/max;
- return h>=5 && h<=34 && sat>0.4 && max>60;
+ if(!(h>=5 && h<=34 && sat>0.4 && max>60)) return null;
+ return {h,s:sat,v:max};
 }
+function hueDist(a,b){ const d=Math.abs(a-b); return Math.min(d,360-d); }
 function detectBall(video, prevBall){
  if(!video.videoWidth) return null;
  const w=BALL_SAMPLE_W, h=Math.max(1,Math.round(BALL_SAMPLE_W*video.videoHeight/video.videoWidth));
@@ -129,9 +138,11 @@ function detectBall(video, prevBall){
 
  const n=w*h;
  const mask=new Uint8Array(n);
+ const hueArr=new Float32Array(n), satArr=new Float32Array(n), valArr=new Float32Array(n);
  for(let i=0;i<n;i++){
   const idx=i*4;
-  if(isOrange(data[idx],data[idx+1],data[idx+2])) mask[i]=1;
+  const p=classifyPixel(data[idx],data[idx+1],data[idx+2]);
+  if(p){ mask[i]=1; hueArr[i]=p.h; satArr[i]=p.s; valArr[i]=p.v; }
  }
 
  const visited=new Uint8Array(n);
@@ -141,11 +152,11 @@ function detectBall(video, prevBall){
  for(let start=0;start<n;start++){
   if(!mask[start]||visited[start]) continue;
   let sp=0; stack[sp++]=start; visited[start]=1;
-  let count=0,sumX=0,sumY=0,minX=w,maxX=0,minY=h,maxY=0;
+  let count=0,sumX=0,sumY=0,minX=w,maxX=0,minY=h,maxY=0,sumH=0,sumS=0,sumV=0;
   while(sp>0){
    const p=stack[--sp];
    const py=(p/w)|0, px=p-py*w;
-   count++; sumX+=px; sumY+=py;
+   count++; sumX+=px; sumY+=py; sumH+=hueArr[p]; sumS+=satArr[p]; sumV+=valArr[p];
    if(px<minX)minX=px; if(px>maxX)maxX=px;
    if(py<minY)minY=py; if(py>maxY)maxY=py;
    if(px>0){const q=p-1; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
@@ -160,10 +171,16 @@ function detectBall(video, prevBall){
   if(bw>w*0.55||bh>h*0.55) continue;         // too big to be just the ball
   if(fill<0.45) continue;                    // faces/hands tend to be less solid (eyes, mouth, finger gaps) than a ball
   if(aspect>1.8) continue;                   // roughly round - filters out very elongated arm/finger shapes (relaxed since small blobs measure noisier)
+  const avgH=sumH/count, avgS=sumS/count, avgV=sumV/count;
+  let colorPenalty=1;
+  if(learnedColor){
+   const dh=hueDist(avgH,learnedColor.h)/25, ds=Math.abs(avgS-learnedColor.s)/0.25, dv=Math.abs(avgV-learnedColor.v)/60;
+   colorPenalty = 1/(1+Math.sqrt(dh*dh+ds*ds+dv*dv)*1.5);
+  }
   const cx=(sumX/count)/w, cy=(sumY/count)/h;
-  let score=count*fill;
+  let score=count*fill*colorPenalty;
   if(prevBall) score/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*8);
-  if(score>bestScore){ bestScore=score; best={x:cx,y:cy,r:Math.sqrt(count/Math.PI)/w}; }
+  if(score>bestScore){ bestScore=score; best={x:cx,y:cy,r:Math.sqrt(count/Math.PI)/w,h:avgH,s:avgS,v:avgV}; }
  }
  if(best) ballRadius=best.r;
  return best;
@@ -194,13 +211,30 @@ initModels().catch(e=>{status.textContent='Model load failed';console.error(e);}
 /* ---------- dribble move classification ----------
    Builds a live "body frame" (shoulder line, hip line, knee line, torso
    length) each frame so thresholds scale with the player's distance from
-   the camera instead of using fixed pixel/ratio constants. */
+   the camera instead of using fixed pixel/ratio constants. Beyond the
+   position-based moves (between-the-legs, behind-the-back, crossover),
+   this also watches for a hesitation/in-and-out: the ball heads toward
+   the midline like it's about to cross, then pulls back to the same
+   side without ever crossing - a distinct, real move, not just a
+   crossover that didn't finish. */
 let sideState=null, moveState='neutral', moveHoldSince=0;
-function classify(bodyFrame, ball){
+let approaching=false, approachSide=null, approachTime=0, hesitationFlag=false;
+function classify(bodyFrame, ball, now){
  if(!bodyFrame||!ball) return null;
  const {midX,shoulderY,hipY,kneeY,leftHipX,rightHipX,leftKneeX,rightKneeX,torso}=bodyFrame;
  const side = ball.x < midX ? 'left' : 'right';
+ const distFromMid = Math.abs(ball.x-midX)/torso;
  let move=null;
+
+ // track approach-then-retreat toward the midline for hesitation detection
+ if(distFromMid<0.3){
+  if(!approaching){ approaching=true; approachSide=side; approachTime=now; }
+ } else if(approaching){
+  if(distFromMid>0.5){
+   if(side===approachSide && now-approachTime<700 && now-approachTime>100) hesitationFlag=true;
+   approaching=false;
+  }
+ }
 
  if(ball.y > hipY + torso*0.05 &&
     ball.x > Math.min(leftKneeX,rightKneeX) - torso*0.1 &&
@@ -211,6 +245,12 @@ function classify(bodyFrame, ball){
   move='Behind the Back';
  } else if(sideState && sideState!==side && ball.y > shoulderY && ball.y < hipY + torso*0.2){
   move='Crossover';
+  approaching=false; hesitationFlag=false;
+ } else if(hesitationFlag){
+  move='In-and-Out';
+  hesitationFlag=false;
+ } else if(ball.y < shoulderY - torso*0.05){
+  move='High Dribble';
  } else if(ball.y < hipY - torso*0.35){
   move='Pound Dribble';
  } else if(ball.y > kneeY - torso*0.15){
@@ -283,9 +323,22 @@ function loop(){
    ballLockStreak++;
    ballLastRawSeen=now;
    if(ballLockStreak>=BALL_LOCK_REQUIRED) ballAcquired=true;
+   // learn/refine this specific ball's color once locked on, so later
+   // frames require a match to it (not just "orange in general")
+   if(ballAcquired){
+    if(!learnedColor) learnedColor={h:ballSeen.h,s:ballSeen.s,v:ballSeen.v};
+    else{
+     learnedColor.h=learnedColor.h*0.9+ballSeen.h*0.1;
+     learnedColor.s=learnedColor.s*0.9+ballSeen.s*0.1;
+     learnedColor.v=learnedColor.v*0.9+ballSeen.v*0.1;
+    }
+   }
   } else {
    ballLockStreak=0;
-   if(now-ballLastRawSeen>BALL_LOST_TIMEOUT_MS) ballAcquired=false;
+   if(now-ballLastRawSeen>BALL_LOST_TIMEOUT_MS && ballAcquired){
+    ballAcquired=false;
+    learnedColor=null; // ball genuinely gone - forget its learned color and start clean on re-acquire
+   }
   }
   P('ball').update(ballSeen?ballSeen.x:undefined, ballSeen?ballSeen.y:undefined, now, !!ballSeen);
   // ball keeps ESP - but the lookahead is the device's own measured frame
@@ -332,7 +385,7 @@ function loop(){
     if(Math.abs(dy)>(bodyFrame?bodyFrame.torso*0.4:0.08)){s-=8;msg='Slow down slightly. Stay controlled.'}
     score=Math.round(score*.85+s*.15);document.getElementById('score').textContent=score;
 
-    const move=classify(bodyFrame,tracked);
+    const move=classify(bodyFrame,tracked,now);
     if(move && move!==moveState && now-moveHoldSince>250){
      moveState=move; moveHoldSince=now; moveCount++;
      document.getElementById('lastMove').textContent=move;
@@ -374,6 +427,8 @@ stop.onclick=()=>{
 };
 reset.onclick=()=>{
  times=[];lastY=null;lastDir=0;score=100;moveCount=0;sideState=null;moveState='neutral';
+ approaching=false;approachSide=null;hesitationFlag=false;
+ learnedColor=null;
  ballLockStreak=0;ballAcquired=false;ballLastRawSeen=0;
  rpm.textContent='—';document.getElementById('score').textContent='—';time.textContent='0:00';
  document.getElementById('hand').textContent='—';
