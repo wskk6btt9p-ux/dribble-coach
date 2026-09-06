@@ -1,39 +1,91 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#070707"><meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Dribble Coach">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#070707">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Dribble Coach">
 <link rel="manifest" href="manifest.json">
 <title>Dribble Coach</title>
 <style>
-*{box-sizing:border-box}body{margin:0;background:#070707;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.app{max-width:760px;margin:auto;padding:14px;padding-bottom:30px}.head{display:flex;justify-content:space-between;align-items:center;margin:4px 0 12px}
-h1{font-size:27px;margin:0}.muted{color:#999;font-size:12px}.stage{position:relative;width:100%;aspect-ratio:3/4;background:#111;border-radius:22px;overflow:hidden}
-video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}canvas{z-index:2}
-.badge{position:absolute;z-index:3;top:12px;left:12px;background:#000b;border-radius:14px;padding:9px 12px;font-weight:800}
-.badge2{position:absolute;z-index:3;top:12px;right:12px;background:#000b;border-radius:14px;padding:9px 12px;font-weight:800;font-size:13px}
-.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-top:10px}.card{background:#151515;border-radius:17px;padding:13px}.label{font-size:11px;color:#888}.num{font-size:25px;font-weight:850;margin-top:3px}
-.feedback{margin-top:10px;background:#151515;border-radius:17px;padding:15px;font-weight:700;min-height:55px}
-button,select{border:0;border-radius:15px;padding:14px;font-size:16px;font-weight:800;width:100%}button{background:#fff;color:#000}.secondary{background:#222;color:#fff}.controls{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}
-.small{margin-top:10px;color:#777;font-size:11px;line-height:1.5;text-align:center}
-</style></head>
-<body><div class="app">
-<div class="head"><div><h1>🏀 Dribble Coach</h1><div class="muted">Live iPhone camera training</div></div><div id="state">OFF</div></div>
-<div class="stage"><video id="video" playsinline muted></video><canvas id="canvas"></canvas><div class="badge" id="status">Camera off</div><div class="badge2" id="predBadge"></div></div>
-<div class="grid">
-<div class="card"><div class="label">DRIBBLES / MIN</div><div class="num" id="rpm">—</div></div>
-<div class="card"><div class="label">BALL</div><div class="num" id="hand">—</div></div>
-<div class="card"><div class="label">FORM SCORE</div><div class="num" id="score">—</div></div>
-<div class="card"><div class="label">SESSION</div><div class="num" id="time">0:00</div></div>
-<div class="card"><div class="label">LAST MOVE</div><div class="num" id="lastMove">—</div></div>
-<div class="card"><div class="label">MOVES</div><div class="num" id="moveCount">0</div></div>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none;background:#070707;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+
+/* ---- rotate-to-landscape prompt (shown only in portrait) ---- */
+.rotate-prompt{display:none;position:fixed;inset:0;z-index:999;background:#070707;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px}
+.rotate-prompt svg{width:60px;height:60px;animation:tilt 1.6s ease-in-out infinite}
+.rotate-prompt h2{margin:0;font-size:19px}
+.rotate-prompt p{margin:0;color:#999;font-size:13px;max-width:260px;line-height:1.5}
+@keyframes tilt{0%,100%{transform:rotate(0)}50%{transform:rotate(90deg)}}
+@media (orientation:portrait){
+ .rotate-prompt{display:flex}
+ .app{display:none}
+}
+
+/* ---- landscape app layout: camera stage + compact stats panel side by side, no scrolling ---- */
+.app{display:flex;height:100vh;height:100dvh;padding:10px;gap:10px;
+ padding-left:max(10px,env(safe-area-inset-left));padding-right:max(10px,env(safe-area-inset-right))}
+.stage{position:relative;flex:1.4;height:100%;background:#111;border-radius:18px;overflow:hidden;min-width:0}
+video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+canvas{z-index:2}
+.badge{position:absolute;z-index:3;top:9px;left:9px;background:#000c;border-radius:11px;padding:6px 10px;font-weight:800;font-size:11.5px}
+.badge2{position:absolute;z-index:3;top:9px;right:9px;background:#000c;border-radius:11px;padding:6px 10px;font-weight:800;font-size:11.5px}
+
+.panel{flex:1;display:flex;flex-direction:column;min-width:0;height:100%;gap:7px}
+.head{display:flex;justify-content:space-between;align-items:center;flex:0 0 auto}
+h1{font-size:17px;margin:0;line-height:1.15}
+.muted{color:#999;font-size:10px}
+#state{font-size:10.5px;font-weight:800;background:#151515;border-radius:9px;padding:4px 9px;flex:0 0 auto}
+
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;flex:0 0 auto}
+.card{background:#151515;border-radius:12px;padding:8px 10px}
+.label{font-size:9px;color:#888;letter-spacing:.02em}
+.num{font-size:18px;font-weight:850;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.feedback{background:#151515;border-radius:12px;padding:9px 11px;font-weight:700;font-size:12px;flex:1;min-height:0;overflow:hidden;display:flex;align-items:center;line-height:1.35}
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:6px;flex:0 0 auto}
+button{border:0;border-radius:12px;padding:10px;font-size:13.5px;font-weight:800;width:100%}
+button{background:#fff;color:#000}
+.secondary{background:#222;color:#fff}
+.small{color:#666;font-size:9px;line-height:1.35;text-align:center;flex:0 0 auto}
+</style>
+</head>
+<body>
+
+<div class="rotate-prompt">
+ <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12" y2="18.01"/></svg>
+ <h2>Rotate your phone</h2>
+ <p>Dribble Coach runs in landscape so the camera can see your full body and the ball at once.</p>
 </div>
-<div class="feedback" id="feedback">Start the camera and keep the ball in frame — dribble reps and moves are tracked from the ball itself, not your hand.</div>
-<div class="controls"><button id="start">Start Camera</button><button id="stop" class="secondary" disabled>Stop</button></div>
-<div class="controls"><select id="mode"><option value="pound">Pound Dribble</option><option value="low">Low Dribble</option><option value="crossover">Crossover</option></select><button id="reset" class="secondary">Reset</button></div>
-<div class="small">For best tracking: prop the phone up, use good lighting, and stand 6–10 ft away so your full body is visible. Camera processing happens in the browser.</div>
+
+<div class="app">
+ <div class="stage">
+  <video id="video" playsinline muted></video>
+  <canvas id="canvas"></canvas>
+  <div class="badge" id="status">Camera off</div>
+  <div class="badge2" id="predBadge"></div>
+ </div>
+ <div class="panel">
+  <div class="head"><div><h1>🏀 Dribble Coach</h1><div class="muted">Live camera training</div></div><div id="state">OFF</div></div>
+  <div class="grid">
+   <div class="card"><div class="label">DRIBBLES / MIN</div><div class="num" id="rpm">—</div></div>
+   <div class="card"><div class="label">BALL</div><div class="num" id="hand">—</div></div>
+   <div class="card"><div class="label">FORM SCORE</div><div class="num" id="score">—</div></div>
+   <div class="card"><div class="label">SESSION</div><div class="num" id="time">0:00</div></div>
+   <div class="card"><div class="label">LAST MOVE</div><div class="num" id="lastMove">—</div></div>
+   <div class="card"><div class="label">MOVES</div><div class="num" id="moveCount">0</div></div>
+  </div>
+  <div class="feedback" id="feedback">Start the camera — reps and moves are detected automatically from the ball and your body, nothing to select.</div>
+  <div class="controls"><button id="start">Start Camera</button><button id="stop" class="secondary" disabled>Stop</button></div>
+  <button id="reset" class="secondary">Reset</button>
+  <div class="small">Prop the phone up landscape, use good lighting, stand 6–10 ft back so your full body is in frame.</div>
+ </div>
 </div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 <script type="module">
 import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
@@ -43,202 +95,139 @@ let running=false,stream=null,rafId=null;
 let lastY=null,lastDir=0,lastBounce=0,times=[],score=100,startTime=0,timer=null;
 let moveCount=0;
 
-/* ---------- skeleton connection tables ---------- */
+/* ---------- skeleton connection tables (arms/torso/legs only - no face) ---------- */
 const POSE_CONNECTIONS=[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],
  [23,25],[25,27],[24,26],[26,28],[27,29],[27,31],[28,30],[28,32],[15,17],[15,19],[15,21],[16,18],[16,20],[16,22]];
-const HAND_CONNECTIONS=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
- [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]]; // kept for reference, unused now that hand tracking is off
+const ARM_CONN=[[11,13],[13,15],[12,14],[14,16],[15,17],[15,19],[15,21],[16,18],[16,20],[16,22]];
+const LEG_CONN=[[23,25],[25,27],[24,26],[26,28],[27,29],[27,31],[28,30],[28,32]];
+const TORSO_CONN=[[11,12],[11,23],[12,24],[23,24]];
 
 /* ---------- predictive smoothing / occlusion filter ----------
    Constant-velocity estimator per landmark. On every real detection it
    blends in fresh velocity; between/after detections (or when a point's
-   visibility score drops - e.g. a hand swings out of frame or behind the
-   body) it keeps extrapolating from the last known velocity for a short
-   window instead of freezing or snapping, so rendering never waits on a
-   fresh frame and doesn't jump when a landmark is briefly occluded. */
+   visibility score drops) it keeps extrapolating from the last known
+   velocity for a short window instead of freezing or snapping, so
+   rendering never waits on a fresh frame and doesn't jump when a
+   landmark is briefly occluded. On a direction reversal (e.g. the ball
+   bouncing off the floor) it snaps straight to the new velocity instead
+   of blending gradually, so the "0 delay" prediction stays correct
+   exactly through the bounce, not just during steady motion. */
 class PointPredictor{
  constructor(){this.x=null;this.y=null;this.vx=0;this.vy=0;this.t=null;this.lastSeen=0;this.visible=false;}
  update(nx,ny,t,seen){
   if(this.x!==null && this.t!==null && seen){
    const dt=Math.max((t-this.t)/1000,1/120);
    const nvx=(nx-this.x)/dt, nvy=(ny-this.y)/dt;
-   // On a direction reversal (e.g. the ball bouncing off the floor) snap
-   // straight to the new velocity instead of blending gradually - a 50/50
-   // blend would drag the old (now-wrong) direction into the lookahead for
-   // a frame or two, causing the predicted point to overshoot past the
-   // bounce. Snapping keeps the "0 delay" prediction correct exactly
-   // through the bounce, not just during steady motion.
-   const wx = (this.vx!==0 && Math.sign(nvx)!==0 && Math.sign(nvx)!==Math.sign(this.vx)) ? 1 : 0.5;
-   const wy = (this.vy!==0 && Math.sign(nvy)!==0 && Math.sign(nvy)!==Math.sign(this.vy)) ? 1 : 0.5;
+   const wx=(this.vx!==0 && Math.sign(nvx)!==0 && Math.sign(nvx)!==Math.sign(this.vx))?1:0.5;
+   const wy=(this.vy!==0 && Math.sign(nvy)!==0 && Math.sign(nvy)!==Math.sign(this.vy))?1:0.5;
    this.vx=this.vx*(1-wx)+nvx*wx; this.vy=this.vy*(1-wy)+nvy*wy;
   }
   if(seen){this.x=nx;this.y=ny;this.lastSeen=t;this.visible=true;}
   else if(this.x!==null){
    const dt=this.t!==null?Math.max((t-this.t)/1000,0):0;
    const age=(t-this.lastSeen)/1000;
-   const conf=Math.max(0,1-age/0.6); // extrapolation confidence decays over 600ms
+   const conf=Math.max(0,1-age/0.6);
    this.x+=this.vx*dt*conf; this.y+=this.vy*dt*conf;
    this.visible=false;
   }
   this.t=t;
  }
  get(){ if(this.x===null) return null; return {x:this.x,y:this.y,live:this.visible}; }
- // Forward-projects the current filtered position by leadMs of velocity.
- // Detection always lags the real world by a frame or two; rendering a
- // little ahead of the last sample - rather than exactly at it - is what
- // makes tracking feel like zero delay instead of always catching up.
  predict(leadMs){
   if(this.x===null) return null;
   const lead=leadMs/1000;
   return {x:this.x+this.vx*lead, y:this.y+this.vy*lead, live:this.visible};
  }
 }
-const pts={}; // lazily created PointPredictor per landmark key
+const pts={};
 function P(key){ return pts[key] || (pts[key]=new PointPredictor()); }
-const BALL_LOCK_REQUIRED=3;  // consecutive real detections needed before we trust/show the ball
-const BALL_LOST_TIMEOUT_MS=1200; // how long without a real detection before we call the ball "lost" and require re-lock
-let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0;
 
-/* ---------- ball tracking (color-blob detector) ----------
-   Downsamples the current video frame to a small offscreen canvas,
-   finds every connected blob matching a basketball-orange hue/saturation
-   range, then filters candidates by size, solidity (fill ratio) and
-   roundness (aspect ratio) - a ball is a compact, filled circle, while a
-   hand, forearm, or head (which can share a similar hue under warm
-   lighting) is thinner/more irregular. Beyond that generic color range,
-   once the ball has been locked onto for a few frames it learns THIS
-   ball's specific average color and starts requiring new candidates to
-   match that learned color too - a much tighter filter than a generic
-   "orange" range, since it's calibrated to the exact ball and lighting
-   in front of the camera rather than orange in general. That's what
-   stops it from re-latching onto skin later even though skin can pass
-   the loose generic gate. Among remaining candidates it also favors
-   whichever is closest to where the ball was last seen. The result
-   feeds the same PointPredictor used for skeleton points, so the ball
-   also gets predictive smoothing and survives brief occlusion. */
-let ballRadius=0.03;
-let learnedColor=null; // {h,s,v} running average of the specific locked-on ball's color
-const ballCanvas=document.createElement('canvas');
-const ballCtx=ballCanvas.getContext('2d',{willReadFrequently:true});
-const BALL_SAMPLE_W=220; // higher res sample so a distant/small ball still gets enough pixels to measure
-function classifyPixel(r,g,b){
- const max=Math.max(r,g,b), min=Math.min(r,g,b);
- if(max<60) return null;
- const d=max-min;
- if(d<25) return null;
- let h;
- if(max===r) h=60*(((g-b)/d)%6);
- else if(max===g) h=60*((b-r)/d+2);
- else h=60*((r-g)/d+4);
- if(h<0) h+=360;
- const sat=d/max;
- if(!(h>=5 && h<=34 && sat>0.4 && max>60)) return null;
- return {h,s:sat,v:max};
+/* ---------- pose model ---------- */
+let poseLandmarker=null, poseReady=false;
+async function initPose(){
+ poseLandmarker=await PoseLandmarker.createFromOptions(
+  await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"),
+  {baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",delegate:"GPU"},
+   runningMode:"VIDEO",numPoses:1}
+ );
+ poseReady=true;
+ updateLoadStatus();
 }
-function hueDist(a,b){ const d=Math.abs(a-b); return Math.min(d,360-d); }
-function detectBall(video, prevBall, headExclude){
- if(!video.videoWidth) return null;
- const w=BALL_SAMPLE_W, h=Math.max(1,Math.round(BALL_SAMPLE_W*video.videoHeight/video.videoWidth));
- if(ballCanvas.width!==w||ballCanvas.height!==h){ballCanvas.width=w;ballCanvas.height=h;}
- ballCtx.drawImage(video,0,0,w,h);
- let data;
- try{ data=ballCtx.getImageData(0,0,w,h).data; }catch(e){ return null; }
+initPose().catch(e=>{status.textContent='Pose model failed';console.error(e);});
 
- const n=w*h;
- const mask=new Uint8Array(n);
- const hueArr=new Float32Array(n), satArr=new Float32Array(n), valArr=new Float32Array(n);
- for(let i=0;i<n;i++){
-  const idx=i*4;
-  const p=classifyPixel(data[idx],data[idx+1],data[idx+2]);
-  if(p){ mask[i]=1; hueArr[i]=p.h; satArr[i]=p.s; valArr[i]=p.v; }
- }
+/* ---------- ball model: a real trained object detector (COCO-SSD,
+   "sports ball" class) instead of a hand-tuned color/shape heuristic.
+   This is the actual fix for "detects my head/hand as the ball" - a
+   trained detector recognizes what a ball actually looks like in
+   context, rather than guessing from hue and blob shape, so it doesn't
+   confuse skin, faces, or stray objects with it the way a color filter
+   inevitably can. It's slower per-call than the old color scan, so
+   detection runs in its own loop, decoupled from the render loop - the
+   predictor's forward lookahead fills in the gaps between real
+   detections, same as before. */
+let ballModel=null, ballModelReady=false;
+async function initBallModel(){
+ ballModel=await cocoSsd.load({base:'lite_mobilenet_v2'});
+ ballModelReady=true;
+ updateLoadStatus();
+}
+initBallModel().catch(e=>{console.error(e); if(!running) status.textContent='Ball model failed to load';});
+function updateLoadStatus(){
+ if(!running) status.textContent = (poseReady&&ballModelReady) ? 'Models ready' : 'Loading models…';
+}
 
- const visited=new Uint8Array(n);
- const stack=new Int32Array(n);
- let best=null, bestScore=-Infinity;
+const BALL_LOCK_REQUIRED=2;       // consecutive real detections needed before we trust/show the ball
+const BALL_LOST_TIMEOUT_MS=1200;  // how long without a real detection before the lock drops and it has to re-acquire
+const BALL_MIN_SCORE=0.45;        // minimum model confidence to even consider a detection
+let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0, ballRadius=0.05, ballDetecting=false;
 
- for(let start=0;start<n;start++){
-  if(!mask[start]||visited[start]) continue;
-  let sp=0; stack[sp++]=start; visited[start]=1;
-  let count=0,sumX=0,sumY=0,minX=w,maxX=0,minY=h,maxY=0,sumH=0,sumS=0,sumV=0;
-  while(sp>0){
-   const p=stack[--sp];
-   const py=(p/w)|0, px=p-py*w;
-   count++; sumX+=px; sumY+=py; sumH+=hueArr[p]; sumS+=satArr[p]; sumV+=valArr[p];
-   if(px<minX)minX=px; if(px>maxX)maxX=px;
-   if(py<minY)minY=py; if(py>maxY)maxY=py;
-   if(px>0){const q=p-1; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
-   if(px<w-1){const q=p+1; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
-   if(py>0){const q=p-w; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
-   if(py<h-1){const q=p+w; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
+async function ballDetectLoop(){
+ if(!running){ return; }
+ if(!ballModelReady || ballDetecting || v.readyState<2){ requestAnimationFrame(ballDetectLoop); return; }
+ ballDetecting=true;
+ try{
+  const preds=await ballModel.detect(v);
+  const now=performance.now();
+  const prevBall=P('ball').get();
+  let best=null,bestScore=-Infinity;
+  for(const p of preds){
+   if(p.class!=='sports ball' || p.score<BALL_MIN_SCORE) continue;
+   const [bx,by,bw,bh]=p.bbox;
+   const cx=(bx+bw/2)/v.videoWidth, cy=(by+bh/2)/v.videoHeight;
+   let sc=p.score;
+   if(prevBall) sc/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*4);
+   if(sc>bestScore){ bestScore=sc; best={x:cx,y:cy,r:Math.max(bw/v.videoWidth,bh/v.videoHeight)/2}; }
   }
-  const bw=maxX-minX+1, bh=maxY-minY+1;
-  const fill=count/(bw*bh);
-  const aspect=Math.max(bw,bh)/Math.max(1,Math.min(bw,bh));
-  if(count<Math.max(20,n*0.0008)) continue;  // speck of noise - a higher floor so tiny highlight specks (skin, glare) can't register as "confident"
-  if(bw>w*0.55||bh>h*0.55) continue;         // too big to be just the ball
-  if(fill<0.45) continue;                    // faces/hands tend to be less solid (eyes, mouth, finger gaps) than a ball
-  if(aspect>1.8) continue;                   // roughly round - filters out very elongated arm/finger shapes (relaxed since small blobs measure noisier)
-  const cx=(sumX/count)/w, cy=(sumY/count)/h;
-  if(headExclude){
-   const dHead=Math.hypot(cx-headExclude.x, cy-headExclude.y);
-   if(dHead<headExclude.r) continue;         // inside the face/head region - never the ball, no matter how well it matches color
+  if(best){
+   ballLockStreak++; ballLastRawSeen=now; ballRadius=best.r;
+   if(ballLockStreak>=BALL_LOCK_REQUIRED) ballAcquired=true;
+  } else {
+   ballLockStreak=0;
+   if(now-ballLastRawSeen>BALL_LOST_TIMEOUT_MS) ballAcquired=false;
   }
-  const avgH=sumH/count, avgS=sumS/count, avgV=sumV/count;
-  let colorPenalty=1;
-  if(learnedColor){
-   const dh=hueDist(avgH,learnedColor.h)/25, ds=Math.abs(avgS-learnedColor.s)/0.25, dv=Math.abs(avgV-learnedColor.v)/60;
-   colorPenalty = 1/(1+Math.sqrt(dh*dh+ds*ds+dv*dv)*1.5);
-  }
-  let score=count*fill*colorPenalty;
-  if(prevBall) score/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*8);
-  if(score>bestScore){ bestScore=score; best={x:cx,y:cy,r:Math.sqrt(count/Math.PI)/w,h:avgH,s:avgS,v:avgV}; }
- }
- if(best) ballRadius=best.r;
- return best;
+  P('ball').update(best?best.x:undefined, best?best.y:undefined, now, !!best);
+ }catch(e){ console.error(e); }
+ ballDetecting=false;
+ if(running) requestAnimationFrame(ballDetectLoop);
 }
-function drawBall(ballPt){
- const r=Math.max(10, ballRadius*c.width);
- x.strokeStyle = ballPt.live ? '#ff8a00' : '#ffd54a';
- x.lineWidth=4;
- x.beginPath();
- x.arc(ballPt.x*c.width, ballPt.y*c.height, r, 0, 7);
- x.stroke();
-}
-
-/* ---------- model setup ---------- */
-let poseLandmarker=null, ready=false;
-async function initModels(){
- status.textContent='Loading models…';
- const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
- poseLandmarker=await PoseLandmarker.createFromOptions(vision,{
-  baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",delegate:"GPU"},
-  runningMode:"VIDEO",numPoses:1
- });
- ready=true;
- status.textContent='Models ready';
-}
-initModels().catch(e=>{status.textContent='Model load failed';console.error(e);});
 
 /* ---------- dribble move classification ----------
-   Builds a live "body frame" (shoulder line, hip line, knee line, torso
-   length) each frame so thresholds scale with the player's distance from
-   the camera instead of using fixed pixel/ratio constants. Beyond the
-   position-based moves (between-the-legs, behind-the-back, crossover),
-   this also watches for a hesitation/in-and-out: the ball heads toward
-   the midline like it's about to cross, then pulls back to the same
-   side without ever crossing - a distinct, real move, not just a
-   crossover that didn't finish. */
+   Fully automatic - there is no manual mode/setting. Builds a live
+   "body frame" (shoulder line, hip line, knee line, torso length) each
+   frame so thresholds scale with the player's distance from the camera,
+   then reads off whichever move the ball's actual trajectory matches:
+   Between the Legs, Behind the Back, Crossover, In-and-Out (approaches
+   the midline then pulls back without crossing), High Dribble, Pound
+   Dribble, or Low Dribble. */
 let sideState=null, moveState='neutral', moveHoldSince=0;
 let approaching=false, approachSide=null, approachTime=0, hesitationFlag=false;
 function classify(bodyFrame, ball, now){
  if(!bodyFrame||!ball) return null;
  const {midX,shoulderY,hipY,kneeY,leftHipX,rightHipX,leftKneeX,rightKneeX,torso}=bodyFrame;
- const side = ball.x < midX ? 'left' : 'right';
- const distFromMid = Math.abs(ball.x-midX)/torso;
+ const side=ball.x<midX?'left':'right';
+ const distFromMid=Math.abs(ball.x-midX)/torso;
  let move=null;
 
- // track approach-then-retreat toward the midline for hesitation detection
  if(distFromMid<0.3){
   if(!approaching){ approaching=true; approachSide=side; approachTime=now; }
  } else if(approaching){
@@ -272,47 +261,65 @@ function classify(bodyFrame, ball, now){
  return move;
 }
 
-/* ---------- drawing ---------- */
-function drawSkeleton(landmarks, conns, colorLive, colorPred){
- x.lineWidth=4;
- for(const [a,b] of conns){
-  const A=landmarks[a], B=landmarks[b];
-  if(!A||!B) continue;
-  x.strokeStyle=(A.live&&B.live)?colorLive:colorPred;
-  x.beginPath();x.moveTo(A.x*c.width,A.y*c.height);x.lineTo(B.x*c.width,B.y*c.height);x.stroke();
+/* ---------- drawing: styled HUD skeleton + ball ---------- */
+function drawSkeleton(landmarks){
+ x.save();
+ x.lineCap='round';
+ const groups=[[ARM_CONN,'#22e5ff'],[LEG_CONN,'#c084fc'],[TORSO_CONN,'#5eead4']];
+ for(const [conns,color] of groups){
+  for(const [a,b] of conns){
+   const A=landmarks[a],B=landmarks[b];
+   if(!A||!B) continue;
+   const live=A.live&&B.live;
+   x.shadowColor=color; x.shadowBlur=live?9:3;
+   x.strokeStyle=live?color:color+'80';
+   x.lineWidth=live?5:4;
+   x.beginPath();x.moveTo(A.x*c.width,A.y*c.height);x.lineTo(B.x*c.width,B.y*c.height);x.stroke();
+  }
  }
- // only draw dots for points that are actually part of the skeleton
- // (arms/torso/legs via conns) - landmarks tracked for other purposes,
- // like the nose used for the ball's head-exclusion zone, stay invisible
+ x.shadowBlur=0;
  const usedIdx=new Set();
- for(const [a,b] of conns){ usedIdx.add(a); usedIdx.add(b); }
+ for(const [a,b] of POSE_CONNECTIONS){ usedIdx.add(a); usedIdx.add(b); }
  for(const i of usedIdx){
-  const p=landmarks[i];
-  if(!p) continue;
-  x.fillStyle=p.live?'#fff':'#ffd54a';
-  x.beginPath();x.arc(p.x*c.width,p.y*c.height,p.live?3:4,0,7);x.fill();
+  const p=landmarks[i]; if(!p) continue;
+  x.beginPath();x.arc(p.x*c.width,p.y*c.height,p.live?4.5:3.5,0,7);
+  x.fillStyle=p.live?'#fff':'#ffffff90';
+  x.fill();
+  x.beginPath();x.arc(p.x*c.width,p.y*c.height,p.live?8:6.5,0,7);
+  x.lineWidth=1.4;
+  x.strokeStyle=p.live?'#ffffffaa':'#ffffff40';
+  x.stroke();
  }
+ x.restore();
+}
+function drawBall(ballPt){
+ const r=Math.max(13, ballRadius*c.width);
+ x.save();
+ x.shadowColor='#ff8a00'; x.shadowBlur=ballPt.live?16:6;
+ x.strokeStyle=ballPt.live?'#ff8a00':'#ffd54a';
+ x.lineWidth=4;
+ x.beginPath(); x.arc(ballPt.x*c.width, ballPt.y*c.height, r, 0, 7); x.stroke();
+ x.restore();
 }
 
-let lastFrameTime=null, avgFrameMs=20; // rolling average of real frame interval - the actual measured latency of this device right now
+let lastFrameTime=null, avgFrameMs=20;
 
-/* ---------- main render loop ---------- */
+/* ---------- main render loop (body pose; ball detection runs in its own loop above) ---------- */
 function loop(){
  if(!running){ return; }
- const vw=v.videoWidth||720, vh=v.videoHeight||960;
+ const vw=v.videoWidth||1280, vh=v.videoHeight||720;
  if(c.width!==vw) c.width=vw;
  if(c.height!==vh) c.height=vh;
  x.clearRect(0,0,c.width,c.height);
  const now=performance.now();
- if(lastFrameTime!==null) avgFrameMs = avgFrameMs*0.9 + (now-lastFrameTime)*0.1;
+ if(lastFrameTime!==null) avgFrameMs=avgFrameMs*0.9+(now-lastFrameTime)*0.1;
  lastFrameTime=now;
  let anyPredicted=false;
 
- if(ready && v.readyState>=2){
+ if(poseReady && v.readyState>=2){
   const poseRes=poseLandmarker.detectForVideo(v,now);
-
   const poseLm=poseRes.landmarks?.[0]||null;
-  const poseIdx=[0,11,12,13,14,15,16,23,24,25,26,27,28];
+  const poseIdx=[11,12,13,14,15,16,23,24,25,26,27,28];
   const poseArr=new Array(29).fill(null);
   if(poseLm){
    for(const i of poseIdx){
@@ -323,63 +330,14 @@ function loop(){
   } else {
    for(const i of poseIdx) P('pose'+i).update(undefined,undefined,now,false);
   }
-  // body: forward-predicted (ESP) using the same measured-latency lookahead
-  // as the ball, so the skeleton renders at "now" instead of one detection
-  // behind, and stays consistent with how the ball is predicted
   for(const i of poseIdx) poseArr[i]=P('pose'+i).predict(Math.min(avgFrameMs,80));
+  drawSkeleton(poseArr);
 
-  // ball: detect it every frame (shape-filtered so a hand/arm can't be
-  // mistaken for the ball). The face/head region (from the body pose we
-  // already have) is excluded outright first - a face can share the
-  // ball's color under warm lighting, but it's never where the ball is,
-  // so there's no reason to even consider blobs there. A real detection
-  // must then land BALL_LOCK_REQUIRED frames in a row before we trust it
-  // and start showing/using it - this is what stops a single stray blob
-  // from ever registering as "the ball" or counting toward a rep. Once
-  // locked on, brief misses (occlusion) are tolerated via the predictor's
-  // own decay; only a long gap (BALL_LOST_TIMEOUT_MS) drops the lock and
-  // requires re-acquiring it.
-  const noseP=poseArr[0], lsP=poseArr[11], rsP=poseArr[12];
-  let headExclude=null;
-  if(noseP&&lsP&&rsP){
-   const shoulderW=Math.hypot(lsP.x-rsP.x, lsP.y-rsP.y);
-   headExclude={x:noseP.x, y:noseP.y, r:Math.max(0.07, shoulderW*0.85)};
-  }
-  const prevBall=P('ball').get();
-  const ballSeen=detectBall(v, prevBall, headExclude);
-  if(ballSeen){
-   ballLockStreak++;
-   ballLastRawSeen=now;
-   if(ballLockStreak>=BALL_LOCK_REQUIRED) ballAcquired=true;
-   // learn/refine this specific ball's color once locked on, so later
-   // frames require a match to it (not just "orange in general")
-   if(ballAcquired){
-    if(!learnedColor) learnedColor={h:ballSeen.h,s:ballSeen.s,v:ballSeen.v};
-    else{
-     learnedColor.h=learnedColor.h*0.9+ballSeen.h*0.1;
-     learnedColor.s=learnedColor.s*0.9+ballSeen.s*0.1;
-     learnedColor.v=learnedColor.v*0.9+ballSeen.v*0.1;
-    }
-   }
-  } else {
-   ballLockStreak=0;
-   if(now-ballLastRawSeen>BALL_LOST_TIMEOUT_MS && ballAcquired){
-    ballAcquired=false;
-    learnedColor=null; // ball genuinely gone - forget its learned color and start clean on re-acquire
-   }
-  }
-  P('ball').update(ballSeen?ballSeen.x:undefined, ballSeen?ballSeen.y:undefined, now, !!ballSeen);
-  // ball keeps ESP - but the lookahead is the device's own measured frame
-  // interval (capped for stability), not a guessed constant. That's the
-  // minimum lookahead that actually cancels real pipeline lag - no more.
   const ballLookahead=Math.min(avgFrameMs,80);
   const ballPt = ballAcquired ? P('ball').predict(ballLookahead) : null;
-
-  drawSkeleton(poseArr, POSE_CONNECTIONS, '#3aa0ff', '#3aa0ff88');
   if(ballPt) drawBall(ballPt);
 
-  // the ball alone drives dribble reps, height checks, and move detection
-  let tracked = ballPt;
+  let tracked=ballPt;
   anyPredicted = tracked && !tracked.live;
 
   const ls=poseArr[11],rs=poseArr[12],lh=poseArr[23],rh=poseArr[24],lk=poseArr[25],rk=poseArr[26];
@@ -391,12 +349,12 @@ function loop(){
   }
 
   if(tracked){
-   status.textContent = (anyPredicted ? 'Tracking ball (predicted)' : 'Tracking ball') + ' · ' + avgFrameMs.toFixed(0) + 'ms';
-   document.getElementById('hand').textContent = anyPredicted ? 'Predicted' : 'Live';
+   status.textContent=(anyPredicted?'Tracking ball (predicted)':'Tracking ball')+' · '+avgFrameMs.toFixed(0)+'ms';
+   document.getElementById('hand').textContent=anyPredicted?'Predicted':'Live';
    const y=tracked.y;
    if(lastY!==null){
     const dy=y-lastY;
-    const thresh = bodyFrame ? bodyFrame.torso*0.06 : 0.012;
+    const thresh=bodyFrame?bodyFrame.torso*0.06:0.012;
     const dir=dy>thresh?1:dy<-thresh?-1:lastDir;
     if(lastDir===1&&dir===-1&&now-lastBounce>180){
      lastBounce=now;times.push(now);times=times.filter(t=>now-t<60000);
@@ -405,13 +363,8 @@ function loop(){
     lastDir=dir;
 
     let s=100,msg='Good control. Keep the rhythm steady.';
-    const mode=document.getElementById('mode').value;
-    if(bodyFrame){
-     if(mode==='low'&&y<bodyFrame.hipY-bodyFrame.torso*0.15){s=82;msg='Go lower. Keep the ball around knee height.'}
-     if(mode==='pound'&&y>bodyFrame.hipY+bodyFrame.torso*0.4){s=80;msg='Push harder and keep your hand working below your waist.'}
-    }
-    if(Math.abs(dy)>(bodyFrame?bodyFrame.torso*0.4:0.08)){s-=8;msg='Slow down slightly. Stay controlled.'}
-    score=Math.round(score*.85+s*.15);document.getElementById('score').textContent=score;
+    if(Math.abs(dy)>(bodyFrame?bodyFrame.torso*0.4:0.08)){ s-=8; msg='Slow down slightly. Stay controlled.'; }
+    score=Math.round(score*.85+s*.15); document.getElementById('score').textContent=score;
 
     const move=classify(bodyFrame,tracked,now);
     if(move && move!==moveState && now-moveHoldSince>250){
@@ -424,39 +377,40 @@ function loop(){
    }
    lastY=y;
   } else {
-   status.textContent = ballLockStreak>0 ? 'Locking onto ball…' : 'Find the ball…';
+   status.textContent = ballLockStreak>0 ? 'Locking onto ball…' : (ballModelReady ? 'Find the ball…' : 'Loading ball model…');
    feedback.textContent='Make sure the ball is visible and well lit.';
   }
  }
 
- predBadge.textContent = anyPredicted ? '⚡ predicted' : '';
+ predBadge.textContent=anyPredicted?'⚡ predicted':'';
  rafId=requestAnimationFrame(loop);
 }
 
 /* ---------- controls ---------- */
 start.onclick=async()=>{
  try{
-  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1280},height:{ideal:1920},frameRate:{ideal:60,max:60}},audio:false});
-   try{const track=stream.getVideoTracks()[0], caps=track.getCapabilities?.(); if(caps?.zoom){const z=caps.zoom.min; await track.applyConstraints({advanced:[{zoom:z}]});}}catch(e){console.warn('0.5x zoom not supported on this camera',e);}
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:60,max:60}},audio:false});
+  try{const track=stream.getVideoTracks()[0], caps=track.getCapabilities?.(); if(caps?.zoom){const z=caps.zoom.min; await track.applyConstraints({advanced:[{zoom:z}]});}}catch(e){console.warn('0.5x zoom not supported on this camera',e);}
   v.srcObject=stream;await v.play();
   running=true;startTime=Date.now();
   start.disabled=true;stop.disabled=false;state.textContent='ON';status.textContent='Tracking…';
   timer=setInterval(()=>{let s=Math.floor((Date.now()-startTime)/1000);time.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0')},500);
   rafId=requestAnimationFrame(loop);
- }catch(e){status.textContent='Camera blocked';feedback.textContent='Allow camera access for Safari, then try again.';console.error(e);}
+  requestAnimationFrame(ballDetectLoop);
+ }catch(e){status.textContent='Camera blocked';feedback.textContent='Allow camera access, then try again.';console.error(e);}
 };
 stop.onclick=()=>{
  running=false;
  if(rafId) cancelAnimationFrame(rafId);
  if(stream) stream.getTracks().forEach(t=>t.stop());
  v.srcObject=null;
- start.disabled=false;stop.disabled=true;state.textContent='OFF';status.textContent='Camera off';predBadge.textContent='';
+ start.disabled=false;stop.disabled=true;state.textContent='OFF';predBadge.textContent='';
+ updateLoadStatus();
  clearInterval(timer);
 };
 reset.onclick=()=>{
  times=[];lastY=null;lastDir=0;score=100;moveCount=0;sideState=null;moveState='neutral';
  approaching=false;approachSide=null;hesitationFlag=false;
- learnedColor=null;
  ballLockStreak=0;ballAcquired=false;ballLastRawSeen=0;
  rpm.textContent='—';document.getElementById('score').textContent='—';time.textContent='0:00';
  document.getElementById('hand').textContent='—';
