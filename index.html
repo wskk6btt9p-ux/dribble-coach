@@ -112,14 +112,20 @@ const TORSO_CONN=[[11,12],[11,23],[12,24],[23,24]];
    bouncing off the floor) it snaps straight to the new velocity instead
    of blending gradually, so the "0 delay" prediction stays correct
    exactly through the bounce, not just during steady motion. */
+const MAX_JUMP_SPEED=3.5; // normalized units/sec - a real limb or ball never moves this fast in-frame; anything above it is a tracking glitch (e.g. left/right landmark confusion when body parts overlap), not real motion
 class PointPredictor{
  constructor(){this.x=null;this.y=null;this.vx=0;this.vy=0;this.t=null;this.lastSeen=0;this.visible=false;}
  update(nx,ny,t,seen){
+  if(seen && this.x!==null && this.t!==null){
+   const dt0=Math.max((t-this.t)/1000,1/120);
+   const jumpSpeed=Math.hypot(nx-this.x,ny-this.y)/dt0;
+   if(jumpSpeed>MAX_JUMP_SPEED) seen=false; // reject the implausible teleport; keep coasting on the last good trajectory instead of snapping to it
+  }
   if(this.x!==null && this.t!==null && seen){
    const dt=Math.max((t-this.t)/1000,1/120);
    const nvx=(nx-this.x)/dt, nvy=(ny-this.y)/dt;
-   const wx=(this.vx!==0 && Math.sign(nvx)!==0 && Math.sign(nvx)!==Math.sign(this.vx))?1:0.5;
-   const wy=(this.vy!==0 && Math.sign(nvy)!==0 && Math.sign(nvy)!==Math.sign(this.vy))?1:0.5;
+   const wx=(this.vx!==0 && Math.sign(nvx)!==0 && Math.sign(nvx)!==Math.sign(this.vx))?1:0.6;
+   const wy=(this.vy!==0 && Math.sign(nvy)!==0 && Math.sign(nvy)!==Math.sign(this.vy))?1:0.6;
    this.vx=this.vx*(1-wx)+nvx*wx; this.vy=this.vy*(1-wy)+nvy*wy;
   }
   if(seen){this.x=nx;this.y=ny;this.lastSeen=t;this.visible=true;}
@@ -171,15 +177,17 @@ async function initBallModel(){
  ballModelReady=true;
  updateLoadStatus();
 }
-initBallModel().catch(e=>{console.error(e); if(!running) status.textContent='Ball model failed to load';});
+let ballModelFailed=false;
+initBallModel().catch(e=>{console.error(e); ballModelFailed=true; if(!running) status.textContent='Ball model failed to load';});
 function updateLoadStatus(){
  if(!running) status.textContent = (poseReady&&ballModelReady) ? 'Models ready' : 'Loading models…';
 }
 
 const BALL_LOCK_REQUIRED=2;       // consecutive real detections needed before we trust/show the ball
 const BALL_LOST_TIMEOUT_MS=1200;  // how long without a real detection before the lock drops and it has to re-acquire
-const BALL_MIN_SCORE=0.45;        // minimum model confidence to even consider a detection
+const BALL_MIN_SCORE=0.2;         // a real basketball mid-dribble (motion blur, partly gripped by a hand) often scores lower confidence than a clean stock photo - BALL_LOCK_REQUIRED is what guards against noise, not this
 let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0, ballRadius=0.05, ballDetecting=false;
+let lastBallDetectTime=null, avgBallMs=90; // the ball detector's OWN measured cadence - a full ML model call is much slower than a render frame, so it needs its own latency estimate rather than borrowing the pose loop's
 
 async function ballDetectLoop(){
  if(!running){ return; }
@@ -188,6 +196,8 @@ async function ballDetectLoop(){
  try{
   const preds=await ballModel.detect(v);
   const now=performance.now();
+  if(lastBallDetectTime!==null) avgBallMs=avgBallMs*0.8+(now-lastBallDetectTime)*0.2;
+  lastBallDetectTime=now;
   const prevBall=P('ball').get();
   let best=null,bestScore=-Infinity;
   for(const p of preds){
@@ -333,7 +343,7 @@ function loop(){
   for(const i of poseIdx) poseArr[i]=P('pose'+i).predict(Math.min(avgFrameMs,80));
   drawSkeleton(poseArr);
 
-  const ballLookahead=Math.min(avgFrameMs,80);
+  const ballLookahead=Math.min(avgBallMs,200);
   const ballPt = ballAcquired ? P('ball').predict(ballLookahead) : null;
   if(ballPt) drawBall(ballPt);
 
@@ -377,7 +387,7 @@ function loop(){
    }
    lastY=y;
   } else {
-   status.textContent = ballLockStreak>0 ? 'Locking onto ball…' : (ballModelReady ? 'Find the ball…' : 'Loading ball model…');
+   status.textContent = ballModelFailed ? 'Ball model failed to load - check connection' : ballLockStreak>0 ? 'Locking onto ball…' : (ballModelReady ? 'Find the ball…' : 'Loading ball model…');
    feedback.textContent='Make sure the ball is visible and well lit.';
   }
  }
