@@ -12,6 +12,7 @@
 h1{font-size:27px;margin:0}.muted{color:#999;font-size:12px}.stage{position:relative;width:100%;aspect-ratio:3/4;background:#111;border-radius:22px;overflow:hidden}
 video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}canvas{z-index:2}
 .badge{position:absolute;z-index:3;top:12px;left:12px;background:#000b;border-radius:14px;padding:9px 12px;font-weight:800}
+.badge2{position:absolute;z-index:3;top:12px;right:12px;background:#000b;border-radius:14px;padding:9px 12px;font-weight:800;font-size:13px}
 .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-top:10px}.card{background:#151515;border-radius:17px;padding:13px}.label{font-size:11px;color:#888}.num{font-size:25px;font-weight:850;margin-top:3px}
 .feedback{margin-top:10px;background:#151515;border-radius:17px;padding:15px;font-weight:700;min-height:55px}
 button,select{border:0;border-radius:15px;padding:14px;font-size:16px;font-weight:800;width:100%}button{background:#fff;color:#000}.secondary{background:#222;color:#fff}.controls{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}
@@ -19,62 +20,247 @@ button,select{border:0;border-radius:15px;padding:14px;font-size:16px;font-weigh
 </style></head>
 <body><div class="app">
 <div class="head"><div><h1>🏀 Dribble Coach</h1><div class="muted">Live iPhone camera training</div></div><div id="state">OFF</div></div>
-<div class="stage"><video id="video" playsinline muted></video><canvas id="canvas"></canvas><div class="badge" id="status">Camera off</div></div>
+<div class="stage"><video id="video" playsinline muted></video><canvas id="canvas"></canvas><div class="badge" id="status">Camera off</div><div class="badge2" id="predBadge"></div></div>
 <div class="grid">
 <div class="card"><div class="label">DRIBBLES / MIN</div><div class="num" id="rpm">—</div></div>
 <div class="card"><div class="label">HAND</div><div class="num" id="hand">—</div></div>
 <div class="card"><div class="label">FORM SCORE</div><div class="num" id="score">—</div></div>
 <div class="card"><div class="label">SESSION</div><div class="num" id="time">0:00</div></div>
+<div class="card"><div class="label">LAST MOVE</div><div class="num" id="lastMove">—</div></div>
+<div class="card"><div class="label">MOVES</div><div class="num" id="moveCount">0</div></div>
 </div>
-<div class="feedback" id="feedback">Start the camera and keep your hand + ball visible.</div>
+<div class="feedback" id="feedback">Start the camera and keep your body in frame — full-body tracking works even if a hand briefly leaves view.</div>
 <div class="controls"><button id="start">Start Camera</button><button id="stop" class="secondary" disabled>Stop</button></div>
 <div class="controls"><select id="mode"><option value="pound">Pound Dribble</option><option value="low">Low Dribble</option><option value="crossover">Crossover</option></select><button id="reset" class="secondary">Reset</button></div>
-<div class="small">For best tracking: prop the phone up, use good lighting, and stand 6–10 ft away. Camera processing happens in the browser.</div>
+<div class="small">For best tracking: prop the phone up, use good lighting, and stand 6–10 ft away so your full body is visible. Camera processing happens in the browser.</div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-<script>
-const v=document.getElementById('video'),c=document.getElementById('canvas'),x=c.getContext('2d');
-const status=document.getElementById('status'),feedback=document.getElementById('feedback');
-let running=false,cam=null,lastY=null,lastDir=0,lastBounce=0,times=[],score=100,startTime=0,timer=null;
+<script type="module">
+import { PoseLandmarker, HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
-const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
-hands.setOptions({maxNumHands:2,modelComplexity:1,minDetectionConfidence:.55,minTrackingConfidence:.55});
-hands.onResults(r=>{
- if(!running)return;
- c.width=v.videoWidth||720;c.height=v.videoHeight||960;x.clearRect(0,0,c.width,c.height);
- let lm=r.multiHandLandmarks?.[0], y=null;
- if(lm){drawConnectors(x,lm,HAND_CONNECTIONS,{color:'#00ff99',lineWidth:4});drawLandmarks(x,lm,{color:'#fff',lineWidth:2,radius:3});y=lm[0].y;
- document.getElementById('hand').textContent=r.multiHandedness?.[0]?.label||'Hand';status.textContent='Tracking';}
- else {status.textContent='Find hand…';feedback.textContent='Move your hand into view.';return}
- const now=performance.now();
- if(lastY!==null){
-  const dy=y-lastY;const dir=dy>.012?1:dy<-.012?-1:lastDir;
-  if(lastDir===1&&dir===-1&&now-lastBounce>180){
-   lastBounce=now;times.push(now);times=times.filter(t=>now-t<60000);
-   document.getElementById('rpm').textContent=times.length;
+const v=document.getElementById('video'),c=document.getElementById('canvas'),x=c.getContext('2d');
+const status=document.getElementById('status'),feedback=document.getElementById('feedback'),predBadge=document.getElementById('predBadge');
+let running=false,stream=null,rafId=null;
+let lastY=null,lastDir=0,lastBounce=0,times=[],score=100,startTime=0,timer=null;
+let moveCount=0;
+
+/* ---------- skeleton connection tables ---------- */
+const POSE_CONNECTIONS=[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],
+ [23,25],[25,27],[24,26],[26,28],[27,29],[27,31],[28,30],[28,32],[15,17],[15,19],[15,21],[16,18],[16,20],[16,22]];
+const HAND_CONNECTIONS=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+ [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+/* ---------- predictive smoothing / occlusion filter ----------
+   Constant-velocity estimator per landmark. On every real detection it
+   blends in fresh velocity; between/after detections (or when a point's
+   visibility score drops - e.g. a hand swings out of frame or behind the
+   body) it keeps extrapolating from the last known velocity for a short
+   window instead of freezing or snapping, so rendering never waits on a
+   fresh frame and doesn't jump when a landmark is briefly occluded. */
+class PointPredictor{
+ constructor(){this.x=null;this.y=null;this.vx=0;this.vy=0;this.t=null;this.lastSeen=0;this.visible=false;}
+ update(nx,ny,t,seen){
+  if(this.x!==null && this.t!==null && seen){
+   const dt=Math.max((t-this.t)/1000,1/120);
+   const vx=(nx-this.x)/dt, vy=(ny-this.y)/dt;
+   this.vx=this.vx*0.5+vx*0.5; this.vy=this.vy*0.5+vy*0.5;
   }
-  lastDir=dir;
-  let s=100,msg='Good control. Keep the rhythm steady.';
-  const mode=document.getElementById('mode').value;
-  if(mode==='low'&&y<.30){s=82;msg='Go lower. Keep the ball around knee height.'}
-  if(mode==='pound'&&y>.64){s=80;msg='Push harder and keep your hand working below your waist.'}
-  if(Math.abs(dy)>.08){s-=8;msg='Slow down slightly. Stay controlled.'}
-  score=Math.round(score*.85+s*.15);document.getElementById('score').textContent=score;
-  feedback.textContent=score>=90?'✓ '+msg:'• '+msg;
+  if(seen){this.x=nx;this.y=ny;this.lastSeen=t;this.visible=true;}
+  else if(this.x!==null){
+   const dt=this.t!==null?Math.max((t-this.t)/1000,0):0;
+   const age=(t-this.lastSeen)/1000;
+   const conf=Math.max(0,1-age/0.6); // extrapolation confidence decays over 600ms
+   this.x+=this.vx*dt*conf; this.y+=this.vy*dt*conf;
+   this.visible=false;
+  }
+  this.t=t;
  }
- lastY=y;
-});
+ get(){ if(this.x===null) return null; return {x:this.x,y:this.y,live:this.visible}; }
+}
+const pts={}; // lazily created PointPredictor per landmark key
+function P(key){ return pts[key] || (pts[key]=new PointPredictor()); }
+
+/* ---------- model setup ---------- */
+let poseLandmarker=null, handLandmarker=null, ready=false;
+async function initModels(){
+ status.textContent='Loading models…';
+ const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+ poseLandmarker=await PoseLandmarker.createFromOptions(vision,{
+  baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",delegate:"GPU"},
+  runningMode:"VIDEO",numPoses:1
+ });
+ handLandmarker=await HandLandmarker.createFromOptions(vision,{
+  baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate:"GPU"},
+  runningMode:"VIDEO",numHands:2
+ });
+ ready=true;
+ status.textContent='Models ready';
+}
+initModels().catch(e=>{status.textContent='Model load failed';console.error(e);});
+
+/* ---------- dribble move classification ----------
+   Builds a live "body frame" (shoulder line, hip line, knee line, torso
+   length) each frame so thresholds scale with the player's distance from
+   the camera instead of using fixed pixel/ratio constants. */
+let sideState=null, moveState='neutral', moveHoldSince=0;
+function classify(bodyFrame, wrist){
+ if(!bodyFrame||!wrist) return null;
+ const {midX,shoulderY,hipY,kneeY,leftHipX,rightHipX,leftKneeX,rightKneeX,torso}=bodyFrame;
+ const side = wrist.x < midX ? 'left' : 'right';
+ let move=null;
+
+ if(wrist.y > hipY + torso*0.05 &&
+    wrist.x > Math.min(leftKneeX,rightKneeX) - torso*0.1 &&
+    wrist.x < Math.max(leftKneeX,rightKneeX) + torso*0.1){
+  move='Between the Legs';
+ } else if((side==='left' && wrist.x > rightHipX + torso*0.15) ||
+           (side==='right' && wrist.x < leftHipX - torso*0.15)){
+  move='Behind the Back';
+ } else if(sideState && sideState!==side && wrist.y > shoulderY && wrist.y < hipY + torso*0.2){
+  move='Crossover';
+ } else if(wrist.y < hipY - torso*0.35){
+  move='Pound Dribble';
+ } else if(wrist.y > kneeY - torso*0.15){
+  move='Low Dribble';
+ }
+ sideState=side;
+ return move;
+}
+
+/* ---------- drawing ---------- */
+function drawSkeleton(landmarks, conns, colorLive, colorPred){
+ x.lineWidth=4;
+ for(const [a,b] of conns){
+  const A=landmarks[a], B=landmarks[b];
+  if(!A||!B) continue;
+  x.strokeStyle=(A.live&&B.live)?colorLive:colorPred;
+  x.beginPath();x.moveTo(A.x*c.width,A.y*c.height);x.lineTo(B.x*c.width,B.y*c.height);x.stroke();
+ }
+ for(const p of landmarks){
+  if(!p) continue;
+  x.fillStyle=p.live?'#fff':'#ffd54a';
+  x.beginPath();x.arc(p.x*c.width,p.y*c.height,p.live?3:4,0,7);x.fill();
+ }
+}
+
+/* ---------- main render loop ---------- */
+function loop(){
+ if(!running){ return; }
+ c.width=v.videoWidth||720;c.height=v.videoHeight||960;
+ x.clearRect(0,0,c.width,c.height);
+ const now=performance.now();
+ let anyPredicted=false;
+
+ if(ready && v.readyState>=2){
+  const poseRes=poseLandmarker.detectForVideo(v,now);
+  const handRes=handLandmarker.detectForVideo(v,now);
+
+  const poseLm=poseRes.landmarks?.[0]||null;
+  const poseIdx=[11,12,13,14,15,16,23,24,25,26,27,28];
+  const poseArr=new Array(29).fill(null);
+  if(poseLm){
+   for(const i of poseIdx){
+    const raw=poseLm[i];
+    const seen=raw && (raw.visibility===undefined || raw.visibility>0.5);
+    P('pose'+i).update(raw?raw.x:undefined, raw?raw.y:undefined, now, !!seen && !!raw);
+   }
+  } else {
+   for(const i of poseIdx) P('pose'+i).update(undefined,undefined,now,false);
+  }
+  for(const i of poseIdx) poseArr[i]=P('pose'+i).get();
+
+  // hands: keep whichever hand landmarker sees; fall back to pose wrist when it doesn't
+  let handLm=handRes.landmarks?.[0]||null;
+  let handLabel=handRes.handedness?.[0]?.[0]?.categoryName||null;
+  const handArr=new Array(21).fill(null);
+  if(handLm){
+   for(let i=0;i<21;i++) P('hand'+i).update(handLm[i].x,handLm[i].y,now,true);
+  } else {
+   for(let i=0;i<21;i++) P('hand'+i).update(undefined,undefined,now,false);
+  }
+  for(let i=0;i<21;i++) handArr[i]=P('hand'+i).get();
+
+  drawSkeleton(poseArr, POSE_CONNECTIONS, '#3aa0ff', '#3aa0ff88');
+  if(handArr[0]) drawSkeleton(handArr, HAND_CONNECTIONS, '#00ff99', '#ffd54a');
+
+  // pick tracked point for dribble logic: hand landmark 9 (palm center) if live/predicted, else pose wrist
+  const rightWrist=poseArr[16], leftWrist=poseArr[15];
+  let tracked = handArr[9] || rightWrist || leftWrist;
+  anyPredicted = (tracked && !tracked.live) || (poseArr[15]&&!poseArr[15].live) || (poseArr[16]&&!poseArr[16].live);
+
+  const ls=poseArr[11],rs=poseArr[12],lh=poseArr[23],rh=poseArr[24],lk=poseArr[25],rk=poseArr[26];
+  let bodyFrame=null;
+  if(ls&&rs&&lh&&rh&&lk&&rk){
+   const shoulderY=(ls.y+rs.y)/2, hipY=(lh.y+rh.y)/2, kneeY=(lk.y+rk.y)/2;
+   bodyFrame={midX:(ls.x+rs.x+lh.x+rh.x)/4, shoulderY, hipY, kneeY,
+    leftHipX:lh.x, rightHipX:rh.x, leftKneeX:lk.x, rightKneeX:rk.x, torso:Math.max(0.05,hipY-shoulderY)};
+  }
+
+  if(tracked){
+   status.textContent = anyPredicted ? 'Tracking (predicted)' : 'Tracking';
+   document.getElementById('hand').textContent = handLabel || (rightWrist||leftWrist ? 'Body' : '—');
+   const y=tracked.y;
+   if(lastY!==null){
+    const dy=y-lastY;
+    const thresh = bodyFrame ? bodyFrame.torso*0.06 : 0.012;
+    const dir=dy>thresh?1:dy<-thresh?-1:lastDir;
+    if(lastDir===1&&dir===-1&&now-lastBounce>180){
+     lastBounce=now;times.push(now);times=times.filter(t=>now-t<60000);
+     document.getElementById('rpm').textContent=times.length;
+    }
+    lastDir=dir;
+
+    let s=100,msg='Good control. Keep the rhythm steady.';
+    const mode=document.getElementById('mode').value;
+    if(bodyFrame){
+     if(mode==='low'&&y<bodyFrame.hipY-bodyFrame.torso*0.15){s=82;msg='Go lower. Keep the ball around knee height.'}
+     if(mode==='pound'&&y>bodyFrame.hipY+bodyFrame.torso*0.4){s=80;msg='Push harder and keep your hand working below your waist.'}
+    }
+    if(Math.abs(dy)>(bodyFrame?bodyFrame.torso*0.4:0.08)){s-=8;msg='Slow down slightly. Stay controlled.'}
+    score=Math.round(score*.85+s*.15);document.getElementById('score').textContent=score;
+
+    const move=classify(bodyFrame,tracked);
+    if(move && move!==moveState && now-moveHoldSince>250){
+     moveState=move; moveHoldSince=now; moveCount++;
+     document.getElementById('lastMove').textContent=move;
+     document.getElementById('moveCount').textContent=moveCount;
+     msg=move+' detected. '+msg;
+    }
+    feedback.textContent=score>=90?'✓ '+msg:'• '+msg;
+   }
+   lastY=y;
+  } else {
+   status.textContent='Find your body…';
+   feedback.textContent='Step back so your full body is visible.';
+  }
+ }
+
+ predBadge.textContent = anyPredicted ? '⚡ predicted' : '';
+ rafId=requestAnimationFrame(loop);
+}
+
+/* ---------- controls ---------- */
 start.onclick=async()=>{
  try{
-  const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:1920}},audio:false});
-  v.srcObject=stream;await v.play();running=true;startTime=Date.now();
-  cam=new Camera(v,{onFrame:async()=>hands.send({image:v}),width:1280,height:1920});cam.start();
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:1920}},audio:false});
+  v.srcObject=stream;await v.play();
+  running=true;startTime=Date.now();
   start.disabled=true;stop.disabled=false;state.textContent='ON';status.textContent='Tracking…';
   timer=setInterval(()=>{let s=Math.floor((Date.now()-startTime)/1000);time.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0')},500);
- }catch(e){status.textContent='Camera blocked';feedback.textContent='Allow camera access for Safari, then try again.'}
+  rafId=requestAnimationFrame(loop);
+ }catch(e){status.textContent='Camera blocked';feedback.textContent='Allow camera access for Safari, then try again.';console.error(e);}
 };
-stop.onclick=()=>{running=false;if(cam)cam.stop();if(v.srcObject)v.srcObject.getTracks().forEach(t=>t.stop());v.srcObject=null;start.disabled=false;stop.disabled=true;state.textContent='OFF';status.textContent='Camera off';clearInterval(timer)};
-reset.onclick=()=>{times=[];lastY=null;lastDir=0;score=100;rpm.textContent='—';document.getElementById('score').textContent='—';time.textContent='0:00';feedback.textContent='Session reset.'};
+stop.onclick=()=>{
+ running=false;
+ if(rafId) cancelAnimationFrame(rafId);
+ if(stream) stream.getTracks().forEach(t=>t.stop());
+ v.srcObject=null;
+ start.disabled=false;stop.disabled=true;state.textContent='OFF';status.textContent='Camera off';predBadge.textContent='';
+ clearInterval(timer);
+};
+reset.onclick=()=>{
+ times=[];lastY=null;lastDir=0;score=100;moveCount=0;sideState=null;moveState='neutral';
+ rpm.textContent='—';document.getElementById('score').textContent='—';time.textContent='0:00';
+ document.getElementById('lastMove').textContent='—';document.getElementById('moveCount').textContent='0';
+ feedback.textContent='Session reset.';
+};
 </script></body></html>
