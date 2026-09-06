@@ -61,8 +61,16 @@ class PointPredictor{
  update(nx,ny,t,seen){
   if(this.x!==null && this.t!==null && seen){
    const dt=Math.max((t-this.t)/1000,1/120);
-   const vx=(nx-this.x)/dt, vy=(ny-this.y)/dt;
-   this.vx=this.vx*0.5+vx*0.5; this.vy=this.vy*0.5+vy*0.5;
+   const nvx=(nx-this.x)/dt, nvy=(ny-this.y)/dt;
+   // On a direction reversal (e.g. the ball bouncing off the floor) snap
+   // straight to the new velocity instead of blending gradually - a 50/50
+   // blend would drag the old (now-wrong) direction into the lookahead for
+   // a frame or two, causing the predicted point to overshoot past the
+   // bounce. Snapping keeps the "0 delay" prediction correct exactly
+   // through the bounce, not just during steady motion.
+   const wx = (this.vx!==0 && Math.sign(nvx)!==0 && Math.sign(nvx)!==Math.sign(this.vx)) ? 1 : 0.5;
+   const wy = (this.vy!==0 && Math.sign(nvy)!==0 && Math.sign(nvy)!==Math.sign(this.vy)) ? 1 : 0.5;
+   this.vx=this.vx*(1-wx)+nvx*wx; this.vy=this.vy*(1-wy)+nvy*wy;
   }
   if(seen){this.x=nx;this.y=ny;this.lastSeen=t;this.visible=true;}
   else if(this.x!==null){
@@ -273,7 +281,13 @@ function drawSkeleton(landmarks, conns, colorLive, colorPred){
   x.strokeStyle=(A.live&&B.live)?colorLive:colorPred;
   x.beginPath();x.moveTo(A.x*c.width,A.y*c.height);x.lineTo(B.x*c.width,B.y*c.height);x.stroke();
  }
- for(const p of landmarks){
+ // only draw dots for points that are actually part of the skeleton
+ // (arms/torso/legs via conns) - landmarks tracked for other purposes,
+ // like the nose used for the ball's head-exclusion zone, stay invisible
+ const usedIdx=new Set();
+ for(const [a,b] of conns){ usedIdx.add(a); usedIdx.add(b); }
+ for(const i of usedIdx){
+  const p=landmarks[i];
   if(!p) continue;
   x.fillStyle=p.live?'#fff':'#ffd54a';
   x.beginPath();x.arc(p.x*c.width,p.y*c.height,p.live?3:4,0,7);x.fill();
