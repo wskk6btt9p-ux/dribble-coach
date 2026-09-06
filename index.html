@@ -105,7 +105,7 @@ let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0;
 let ballRadius=0.03;
 const ballCanvas=document.createElement('canvas');
 const ballCtx=ballCanvas.getContext('2d',{willReadFrequently:true});
-const BALL_SAMPLE_W=160;
+const BALL_SAMPLE_W=220; // higher res sample so a distant/small ball still gets enough pixels to measure
 function isOrange(r,g,b){
  const max=Math.max(r,g,b), min=Math.min(r,g,b);
  if(max<60) return false;
@@ -117,7 +117,7 @@ function isOrange(r,g,b){
  else h=60*((r-g)/d+4);
  if(h<0) h+=360;
  const sat=d/max;
- return h>=8 && h<=26 && sat>0.55 && max>85;
+ return h>=5 && h<=34 && sat>0.4 && max>60;
 }
 function detectBall(video, prevBall){
  if(!video.videoWidth) return null;
@@ -156,10 +156,10 @@ function detectBall(video, prevBall){
   const bw=maxX-minX+1, bh=maxY-minY+1;
   const fill=count/(bw*bh);
   const aspect=Math.max(bw,bh)/Math.max(1,Math.min(bw,bh));
-  if(count<Math.max(14,n*0.0035)) continue;  // speck of noise
-  if(bw>w*0.5||bh>h*0.5) continue;           // too big to be just the ball
-  if(fill<0.62) continue;                    // faces/hands have low fill (eyes, mouth, gaps between fingers break up the blob) - a ball is solid
-  if(aspect>1.35) continue;                  // must be close to circular - a head/hand can be round-ish but is rarely this round
+  if(count<Math.max(6,n*0.0006)) continue;   // speck of noise - low enough to still catch a distant/small ball
+  if(bw>w*0.55||bh>h*0.55) continue;         // too big to be just the ball
+  if(fill<0.45) continue;                    // faces/hands tend to be less solid (eyes, mouth, finger gaps) than a ball
+  if(aspect>1.8) continue;                   // roughly round - filters out very elongated arm/finger shapes (relaxed since small blobs measure noisier)
   const cx=(sumX/count)/w, cy=(sumY/count)/h;
   let score=count*fill;
   if(prevBall) score/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*8);
@@ -265,9 +265,10 @@ function loop(){
   } else {
    for(const i of poseIdx) P('pose'+i).update(undefined,undefined,now,false);
   }
-  // body: no forward-lookahead (no ESP) - just the raw filtered position,
-  // so what's drawn is exactly the latest real detection, nothing guessed
-  for(const i of poseIdx) poseArr[i]=P('pose'+i).get();
+  // body: forward-predicted (ESP) using the same measured-latency lookahead
+  // as the ball, so the skeleton renders at "now" instead of one detection
+  // behind, and stays consistent with how the ball is predicted
+  for(const i of poseIdx) poseArr[i]=P('pose'+i).predict(Math.min(avgFrameMs,80));
 
   // ball: detect it every frame (shape-filtered so a hand/arm/head can't be
   // mistaken for the ball). A real detection must land BALL_LOCK_REQUIRED
