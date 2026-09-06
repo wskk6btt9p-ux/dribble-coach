@@ -29,7 +29,7 @@ button,select{border:0;border-radius:15px;padding:14px;font-size:16px;font-weigh
 <div class="card"><div class="label">LAST MOVE</div><div class="num" id="lastMove">—</div></div>
 <div class="card"><div class="label">MOVES</div><div class="num" id="moveCount">0</div></div>
 </div>
-<div class="feedback" id="feedback">Start the camera and keep your body in frame — full-body tracking works even if a hand briefly leaves view.</div>
+<div class="feedback" id="feedback">Start the camera and keep the ball in frame — dribble reps and moves are tracked from the ball itself, not your hand.</div>
 <div class="controls"><button id="start">Start Camera</button><button id="stop" class="secondary" disabled>Stop</button></div>
 <div class="controls"><select id="mode"><option value="pound">Pound Dribble</option><option value="low">Low Dribble</option><option value="crossover">Crossover</option></select><button id="reset" class="secondary">Reset</button></div>
 <div class="small">For best tracking: prop the phone up, use good lighting, and stand 6–10 ft away so your full body is visible. Camera processing happens in the browser.</div>
@@ -79,6 +79,61 @@ class PointPredictor{
 const pts={}; // lazily created PointPredictor per landmark key
 function P(key){ return pts[key] || (pts[key]=new PointPredictor()); }
 
+/* ---------- ball tracking (color-blob detector) ----------
+   Lightweight orange-ball detector: downsamples the current video frame
+   to a small offscreen canvas, classifies pixels by hue/saturation, and
+   takes the centroid of the matching blob as the ball position. This
+   runs every frame with no extra model load and feeds the same
+   PointPredictor used for skeleton points, so the ball also gets
+   predictive smoothing and survives brief occlusion (e.g. hidden behind
+   a hand or the body mid-move). Tuned for a standard orange basketball;
+   if your lighting/ball color is very different, widen the hue range
+   in isOrange(). */
+let ballRadius=0.03;
+const ballCanvas=document.createElement('canvas');
+const ballCtx=ballCanvas.getContext('2d',{willReadFrequently:true});
+const BALL_SAMPLE_W=160;
+function isOrange(r,g,b){
+ const max=Math.max(r,g,b), min=Math.min(r,g,b);
+ if(max<60) return false;
+ const d=max-min;
+ if(d<25) return false;
+ let h;
+ if(max===r) h=60*(((g-b)/d)%6);
+ else if(max===g) h=60*((b-r)/d+2);
+ else h=60*((r-g)/d+4);
+ if(h<0) h+=360;
+ const sat=d/max;
+ return h>=4 && h<=38 && sat>0.4 && max>75;
+}
+function detectBall(video){
+ if(!video.videoWidth) return null;
+ const w=BALL_SAMPLE_W, h=Math.max(1,Math.round(BALL_SAMPLE_W*video.videoHeight/video.videoWidth));
+ if(ballCanvas.width!==w||ballCanvas.height!==h){ballCanvas.width=w;ballCanvas.height=h;}
+ ballCtx.drawImage(video,0,0,w,h);
+ let data;
+ try{ data=ballCtx.getImageData(0,0,w,h).data; }catch(e){ return null; }
+ let sumX=0,sumY=0,count=0;
+ for(let py=0;py<h;py++){
+  for(let px=0;px<w;px++){
+   const idx=(py*w+px)*4;
+   if(isOrange(data[idx],data[idx+1],data[idx+2])){ sumX+=px; sumY+=py; count++; }
+  }
+ }
+ const minPixels=Math.max(15, w*h*0.004);
+ if(count<minPixels) return null;
+ ballRadius=Math.sqrt(count/Math.PI)/w;
+ return { x:(sumX/count)/w, y:(sumY/count)/h };
+}
+function drawBall(ballPt){
+ const r=Math.max(10, ballRadius*c.width);
+ x.strokeStyle = ballPt.live ? '#ff8a00' : '#ffd54a';
+ x.lineWidth=4;
+ x.beginPath();
+ x.arc(ballPt.x*c.width, ballPt.y*c.height, r, 0, 7);
+ x.stroke();
+}
+
 /* ---------- model setup ---------- */
 let poseLandmarker=null, handLandmarker=null, ready=false;
 async function initModels(){
@@ -102,24 +157,24 @@ initModels().catch(e=>{status.textContent='Model load failed';console.error(e);}
    length) each frame so thresholds scale with the player's distance from
    the camera instead of using fixed pixel/ratio constants. */
 let sideState=null, moveState='neutral', moveHoldSince=0;
-function classify(bodyFrame, wrist){
- if(!bodyFrame||!wrist) return null;
+function classify(bodyFrame, ball){
+ if(!bodyFrame||!ball) return null;
  const {midX,shoulderY,hipY,kneeY,leftHipX,rightHipX,leftKneeX,rightKneeX,torso}=bodyFrame;
- const side = wrist.x < midX ? 'left' : 'right';
+ const side = ball.x < midX ? 'left' : 'right';
  let move=null;
 
- if(wrist.y > hipY + torso*0.05 &&
-    wrist.x > Math.min(leftKneeX,rightKneeX) - torso*0.1 &&
-    wrist.x < Math.max(leftKneeX,rightKneeX) + torso*0.1){
+ if(ball.y > hipY + torso*0.05 &&
+    ball.x > Math.min(leftKneeX,rightKneeX) - torso*0.1 &&
+    ball.x < Math.max(leftKneeX,rightKneeX) + torso*0.1){
   move='Between the Legs';
- } else if((side==='left' && wrist.x > rightHipX + torso*0.15) ||
-           (side==='right' && wrist.x < leftHipX - torso*0.15)){
+ } else if((side==='left' && ball.x > rightHipX + torso*0.15) ||
+           (side==='right' && ball.x < leftHipX - torso*0.15)){
   move='Behind the Back';
- } else if(sideState && sideState!==side && wrist.y > shoulderY && wrist.y < hipY + torso*0.2){
+ } else if(sideState && sideState!==side && ball.y > shoulderY && ball.y < hipY + torso*0.2){
   move='Crossover';
- } else if(wrist.y < hipY - torso*0.35){
+ } else if(ball.y < hipY - torso*0.35){
   move='Pound Dribble';
- } else if(wrist.y > kneeY - torso*0.15){
+ } else if(ball.y > kneeY - torso*0.15){
   move='Low Dribble';
  }
  sideState=side;
@@ -168,9 +223,29 @@ function loop(){
   }
   for(const i of poseIdx) poseArr[i]=P('pose'+i).get();
 
-  // hands: keep whichever hand landmarker sees; fall back to pose wrist when it doesn't
-  let handLm=handRes.landmarks?.[0]||null;
-  let handLabel=handRes.handedness?.[0]?.[0]?.categoryName||null;
+  // ball: detect it every frame, then run it through the same predictor
+  // used for skeleton points so it stays smooth and survives brief occlusion
+  const ballSeen=detectBall(v);
+  P('ball').update(ballSeen?ballSeen.x:undefined, ballSeen?ballSeen.y:undefined, now, !!ballSeen);
+  const ballPt=P('ball').get();
+
+  // hands: of the (up to 2) hands MediaPipe finds, only track whichever one
+  // is closest to the ball right now - the other hand is ignored entirely,
+  // so it never gets drawn and never feeds into dribble/rep logic
+  const handCandidates=handRes.landmarks||[];
+  const handednessCandidates=handRes.handedness||[];
+  let chosenIdx=-1;
+  if(handCandidates.length){
+   if(ballPt){
+    let best=Infinity;
+    handCandidates.forEach((lm,i)=>{
+     const d=Math.hypot(lm[9].x-ballPt.x, lm[9].y-ballPt.y);
+     if(d<best){best=d;chosenIdx=i;}
+    });
+   } else chosenIdx=0;
+  }
+  const handLm = chosenIdx>=0 ? handCandidates[chosenIdx] : null;
+  let handLabel = chosenIdx>=0 ? (handednessCandidates[chosenIdx]?.[0]?.categoryName||null) : null;
   const handArr=new Array(21).fill(null);
   if(handLm){
    for(let i=0;i<21;i++) P('hand'+i).update(handLm[i].x,handLm[i].y,now,true);
@@ -181,11 +256,11 @@ function loop(){
 
   drawSkeleton(poseArr, POSE_CONNECTIONS, '#3aa0ff', '#3aa0ff88');
   if(handArr[0]) drawSkeleton(handArr, HAND_CONNECTIONS, '#00ff99', '#ffd54a');
+  if(ballPt) drawBall(ballPt);
 
-  // pick tracked point for dribble logic: hand landmark 9 (palm center) if live/predicted, else pose wrist
-  const rightWrist=poseArr[16], leftWrist=poseArr[15];
-  let tracked = handArr[9] || rightWrist || leftWrist;
-  anyPredicted = (tracked && !tracked.live) || (poseArr[15]&&!poseArr[15].live) || (poseArr[16]&&!poseArr[16].live);
+  // the ball - not the hand - drives dribble reps, height checks, and move detection
+  let tracked = ballPt;
+  anyPredicted = (tracked && !tracked.live) || (handArr[0] && !handArr[0].live);
 
   const ls=poseArr[11],rs=poseArr[12],lh=poseArr[23],rh=poseArr[24],lk=poseArr[25],rk=poseArr[26];
   let bodyFrame=null;
@@ -196,8 +271,8 @@ function loop(){
   }
 
   if(tracked){
-   status.textContent = anyPredicted ? 'Tracking (predicted)' : 'Tracking';
-   document.getElementById('hand').textContent = handLabel || (rightWrist||leftWrist ? 'Body' : '—');
+   status.textContent = anyPredicted ? 'Tracking ball (predicted)' : 'Tracking ball';
+   document.getElementById('hand').textContent = handLabel || '—';
    const y=tracked.y;
    if(lastY!==null){
     const dy=y-lastY;
@@ -229,8 +304,8 @@ function loop(){
    }
    lastY=y;
   } else {
-   status.textContent='Find your body…';
-   feedback.textContent='Step back so your full body is visible.';
+   status.textContent='Find the ball…';
+   feedback.textContent='Make sure the ball is visible and well lit.';
   }
  }
 
