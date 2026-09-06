@@ -112,14 +112,33 @@ const TORSO_CONN=[[11,12],[11,23],[12,24],[23,24]];
    bouncing off the floor) it snaps straight to the new velocity instead
    of blending gradually, so the "0 delay" prediction stays correct
    exactly through the bounce, not just during steady motion. */
-const MAX_JUMP_SPEED=3.5; // normalized units/sec - a real limb or ball never moves this fast in-frame; anything above it is a tracking glitch (e.g. left/right landmark confusion when body parts overlap), not real motion
+const MAX_JUMP_SPEED=9; // normalized units/sec - genuinely fast hand/ball motion can approach 3-4 units/sec, so the threshold has to sit well above that; this should only catch true teleports (e.g. a left/right landmark swap when limbs overlap), not just fast movement
+const MAX_REJECT_STREAK=4; // safety valve - see note below
 class PointPredictor{
- constructor(){this.x=null;this.y=null;this.vx=0;this.vy=0;this.t=null;this.lastSeen=0;this.visible=false;}
+ constructor(){this.x=null;this.y=null;this.vx=0;this.vy=0;this.t=null;this.lastSeen=0;this.visible=false;this.rejectStreak=0;}
  update(nx,ny,t,seen){
+  let forceReset=false;
   if(seen && this.x!==null && this.t!==null){
    const dt0=Math.max((t-this.t)/1000,1/120);
    const jumpSpeed=Math.hypot(nx-this.x,ny-this.y)/dt0;
-   if(jumpSpeed>MAX_JUMP_SPEED) seen=false; // reject the implausible teleport; keep coasting on the last good trajectory instead of snapping to it
+   if(jumpSpeed>MAX_JUMP_SPEED){
+    // Reject an implausible teleport - BUT only for a few frames in a row.
+    // Without a limit, one bad rejection makes the stored point drift via
+    // extrapolation, which makes the NEXT real detection look even further
+    // away and get rejected too - a runaway feedback loop that never
+    // recovers ("going all over the place"). After MAX_REJECT_STREAK
+    // rejections in a row, force-accept the real detection and hard-reset
+    // velocity, guaranteeing recovery within a few frames either way.
+    this.rejectStreak++;
+    if(this.rejectStreak<MAX_REJECT_STREAK) seen=false;
+    else forceReset=true;
+   } else {
+    this.rejectStreak=0;
+   }
+  }
+  if(forceReset){
+   this.x=nx; this.y=ny; this.vx=0; this.vy=0; this.lastSeen=t; this.visible=true; this.t=t; this.rejectStreak=0;
+   return;
   }
   if(this.x!==null && this.t!==null && seen){
    const dt=Math.max((t-this.t)/1000,1/120);
@@ -187,6 +206,7 @@ const BALL_LOCK_REQUIRED=2;       // consecutive real detections needed before w
 const BALL_LOST_TIMEOUT_MS=1200;  // how long without a real detection before the lock drops and it has to re-acquire
 const BALL_MIN_SCORE=0.2;         // a real basketball mid-dribble (motion blur, partly gripped by a hand) often scores lower confidence than a clean stock photo - BALL_LOCK_REQUIRED is what guards against noise, not this
 let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0, ballRadius=0.05, ballDetecting=false;
+let lastBallDebug='';
 let lastBallDetectTime=null, avgBallMs=90; // the ball detector's OWN measured cadence - a full ML model call is much slower than a render frame, so it needs its own latency estimate rather than borrowing the pose loop's
 
 async function ballDetectLoop(){
@@ -214,6 +234,18 @@ async function ballDetectLoop(){
   } else {
    ballLockStreak=0;
    if(now-ballLastRawSeen>BALL_LOST_TIMEOUT_MS) ballAcquired=false;
+   // diagnostic: show what the model actually saw this pass, so it's
+   // visible whether it's finding nothing at all, finding other objects
+   // but never "sports ball", or finding a sports ball just under the
+   // score threshold - instead of guessing at the number again blind
+   if(!ballAcquired){
+    if(!preds.length) lastBallDebug='sees nothing';
+    else{
+     const top=preds.reduce((a,b)=>b.score>a.score?b:a);
+     const ballPred=preds.filter(p=>p.class==='sports ball').sort((a,b)=>b.score-a.score)[0];
+     lastBallDebug='top: '+top.class+' '+Math.round(top.score*100)+'%'+(ballPred?' · ball: '+Math.round(ballPred.score*100)+'%':'');
+    }
+   }
   }
   P('ball').update(best?best.x:undefined, best?best.y:undefined, now, !!best);
  }catch(e){ console.error(e); }
@@ -388,7 +420,7 @@ function loop(){
    lastY=y;
   } else {
    status.textContent = ballModelFailed ? 'Ball model failed to load - check connection' : ballLockStreak>0 ? 'Locking onto ball…' : (ballModelReady ? 'Find the ball…' : 'Loading ball model…');
-   feedback.textContent='Make sure the ball is visible and well lit.';
+   feedback.textContent = lastBallDebug ? ('Make sure the ball is visible. (model sees: '+lastBallDebug+')') : 'Make sure the ball is visible and well lit.';
   }
  }
 
