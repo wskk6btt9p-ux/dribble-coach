@@ -128,7 +128,7 @@ function classifyPixel(r,g,b){
  return {h,s:sat,v:max};
 }
 function hueDist(a,b){ const d=Math.abs(a-b); return Math.min(d,360-d); }
-function detectBall(video, prevBall){
+function detectBall(video, prevBall, headExclude){
  if(!video.videoWidth) return null;
  const w=BALL_SAMPLE_W, h=Math.max(1,Math.round(BALL_SAMPLE_W*video.videoHeight/video.videoWidth));
  if(ballCanvas.width!==w||ballCanvas.height!==h){ballCanvas.width=w;ballCanvas.height=h;}
@@ -167,17 +167,21 @@ function detectBall(video, prevBall){
   const bw=maxX-minX+1, bh=maxY-minY+1;
   const fill=count/(bw*bh);
   const aspect=Math.max(bw,bh)/Math.max(1,Math.min(bw,bh));
-  if(count<Math.max(6,n*0.0006)) continue;   // speck of noise - low enough to still catch a distant/small ball
+  if(count<Math.max(20,n*0.0008)) continue;  // speck of noise - a higher floor so tiny highlight specks (skin, glare) can't register as "confident"
   if(bw>w*0.55||bh>h*0.55) continue;         // too big to be just the ball
   if(fill<0.45) continue;                    // faces/hands tend to be less solid (eyes, mouth, finger gaps) than a ball
   if(aspect>1.8) continue;                   // roughly round - filters out very elongated arm/finger shapes (relaxed since small blobs measure noisier)
+  const cx=(sumX/count)/w, cy=(sumY/count)/h;
+  if(headExclude){
+   const dHead=Math.hypot(cx-headExclude.x, cy-headExclude.y);
+   if(dHead<headExclude.r) continue;         // inside the face/head region - never the ball, no matter how well it matches color
+  }
   const avgH=sumH/count, avgS=sumS/count, avgV=sumV/count;
   let colorPenalty=1;
   if(learnedColor){
    const dh=hueDist(avgH,learnedColor.h)/25, ds=Math.abs(avgS-learnedColor.s)/0.25, dv=Math.abs(avgV-learnedColor.v)/60;
    colorPenalty = 1/(1+Math.sqrt(dh*dh+ds*ds+dv*dv)*1.5);
   }
-  const cx=(sumX/count)/w, cy=(sumY/count)/h;
   let score=count*fill*colorPenalty;
   if(prevBall) score/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*8);
   if(score>bestScore){ bestScore=score; best={x:cx,y:cy,r:Math.sqrt(count/Math.PI)/w,h:avgH,s:avgS,v:avgV}; }
@@ -294,7 +298,7 @@ function loop(){
   const poseRes=poseLandmarker.detectForVideo(v,now);
 
   const poseLm=poseRes.landmarks?.[0]||null;
-  const poseIdx=[11,12,13,14,15,16,23,24,25,26,27,28];
+  const poseIdx=[0,11,12,13,14,15,16,23,24,25,26,27,28];
   const poseArr=new Array(29).fill(null);
   if(poseLm){
    for(const i of poseIdx){
@@ -310,15 +314,25 @@ function loop(){
   // behind, and stays consistent with how the ball is predicted
   for(const i of poseIdx) poseArr[i]=P('pose'+i).predict(Math.min(avgFrameMs,80));
 
-  // ball: detect it every frame (shape-filtered so a hand/arm/head can't be
-  // mistaken for the ball). A real detection must land BALL_LOCK_REQUIRED
-  // frames in a row before we trust it and start showing/using it - this
-  // is what stops a single stray blob from ever registering as "the ball"
-  // or counting toward a rep. Once locked on, brief misses (occlusion) are
-  // tolerated via the predictor's own decay; only a long gap
-  // (BALL_LOST_TIMEOUT_MS) drops the lock and requires re-acquiring it.
+  // ball: detect it every frame (shape-filtered so a hand/arm can't be
+  // mistaken for the ball). The face/head region (from the body pose we
+  // already have) is excluded outright first - a face can share the
+  // ball's color under warm lighting, but it's never where the ball is,
+  // so there's no reason to even consider blobs there. A real detection
+  // must then land BALL_LOCK_REQUIRED frames in a row before we trust it
+  // and start showing/using it - this is what stops a single stray blob
+  // from ever registering as "the ball" or counting toward a rep. Once
+  // locked on, brief misses (occlusion) are tolerated via the predictor's
+  // own decay; only a long gap (BALL_LOST_TIMEOUT_MS) drops the lock and
+  // requires re-acquiring it.
+  const noseP=poseArr[0], lsP=poseArr[11], rsP=poseArr[12];
+  let headExclude=null;
+  if(noseP&&lsP&&rsP){
+   const shoulderW=Math.hypot(lsP.x-rsP.x, lsP.y-rsP.y);
+   headExclude={x:noseP.x, y:noseP.y, r:Math.max(0.07, shoulderW*0.85)};
+  }
   const prevBall=P('ball').get();
-  const ballSeen=detectBall(v, prevBall);
+  const ballSeen=detectBall(v, prevBall, headExclude);
   if(ballSeen){
    ballLockStreak++;
    ballLastRawSeen=now;
