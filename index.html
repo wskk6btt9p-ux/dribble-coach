@@ -50,6 +50,12 @@ button{border:0;border-radius:12px;padding:10px;font-size:13.5px;font-weight:800
 button{background:#fff;color:#000}
 .secondary{background:#222;color:#fff}
 .small{color:#666;font-size:9px;line-height:1.35;text-align:center;flex:0 0 auto}
+
+/* ---- ball-scan step: shown after the camera starts, before tracking begins ---- */
+.scan-overlay{position:absolute;inset:0;z-index:4;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#000a}
+.scan-ring{width:34vh;height:34vh;max-width:55%;max-height:55%;border:3px dashed #fffb;border-radius:50%;box-shadow:0 0 0 2000px #0000}
+.scan-msg{color:#fff;font-weight:800;font-size:13px;background:#000d;padding:9px 15px;border-radius:12px;text-align:center;max-width:85%;line-height:1.4}
+.scan-overlay button{width:auto;padding:12px 28px}
 </style>
 </head>
 <body>
@@ -66,6 +72,11 @@ button{background:#fff;color:#000}
   <canvas id="canvas"></canvas>
   <div class="badge" id="status">Camera off</div>
   <div class="badge2" id="predBadge"></div>
+  <div class="scan-overlay" id="scanOverlay">
+   <div class="scan-ring"></div>
+   <div class="scan-msg" id="scanMsg">Hold your ball inside the circle, then tap Scan</div>
+   <button id="scanBtn">Scan Ball</button>
+  </div>
  </div>
  <div class="panel">
   <div class="head"><div><h1>🏀 Dribble Coach</h1><div class="muted">Live camera training</div></div><div id="state">OFF</div></div>
@@ -114,6 +125,7 @@ const TORSO_CONN=[[11,12],[11,23],[12,24],[23,24]];
    exactly through the bounce, not just during steady motion. */
 const MAX_JUMP_SPEED=9; // normalized units/sec - genuinely fast hand/ball motion can approach 3-4 units/sec, so the threshold has to sit well above that; this should only catch true teleports (e.g. a left/right landmark swap when limbs overlap), not just fast movement
 const MAX_REJECT_STREAK=4; // safety valve - see note below
+const MAX_VELOCITY=4; // normalized units/sec - ceiling on the STORED velocity used for forward prediction (separate from MAX_JUMP_SPEED, which only gates whether a position update is accepted at all)
 class PointPredictor{
  constructor(){this.x=null;this.y=null;this.vx=0;this.vy=0;this.t=null;this.lastSeen=0;this.visible=false;this.rejectStreak=0;}
  update(nx,ny,t,seen){
@@ -143,9 +155,19 @@ class PointPredictor{
   if(this.x!==null && this.t!==null && seen){
    const dt=Math.max((t-this.t)/1000,1/120);
    const nvx=(nx-this.x)/dt, nvy=(ny-this.y)/dt;
-   const wx=(this.vx!==0 && Math.sign(nvx)!==0 && Math.sign(nvx)!==Math.sign(this.vx))?1:0.6;
-   const wy=(this.vy!==0 && Math.sign(nvy)!==0 && Math.sign(nvy)!==Math.sign(this.vy))?1:0.6;
+   const wx=(this.vx!==0 && Math.sign(nvx)!==0 && Math.sign(nvx)!==Math.sign(this.vx))?1:0.5;
+   const wy=(this.vy!==0 && Math.sign(nvy)!==0 && Math.sign(nvy)!==Math.sign(this.vy))?1:0.5;
    this.vx=this.vx*(1-wx)+nvx*wx; this.vy=this.vy*(1-wy)+nvy*wy;
+   // Hard velocity ceiling. A single noisy frame (finite-difference velocity
+   // from one jittery sample) can occasionally spike far above any real
+   // motion. Since velocity gets projected forward every frame for the
+   // lookahead - not just during occlusion - an unclamped spike shows up
+   // as a joint's connecting line shooting way off to a distant wrong
+   // point, exactly like the "bugged out" lines running off to the edges
+   // of frame. Clamping the magnitude bounds how far any single bad
+   // sample can ever throw the prediction, regardless of how it arose.
+   const speed=Math.hypot(this.vx,this.vy);
+   if(speed>MAX_VELOCITY){ this.vx=this.vx/speed*MAX_VELOCITY; this.vy=this.vy/speed*MAX_VELOCITY; }
   }
   if(seen){this.x=nx;this.y=ny;this.lastSeen=t;this.visible=true;}
   else if(this.x!==null){
@@ -205,12 +227,67 @@ function updateLoadStatus(){
 const BALL_LOCK_REQUIRED=2;       // consecutive real detections needed before we trust/show the ball
 const BALL_LOST_TIMEOUT_MS=1200;  // how long without a real detection before the lock drops and it has to re-acquire
 const BALL_MIN_SCORE=0.2;         // a real basketball mid-dribble (motion blur, partly gripped by a hand) often scores lower confidence than a clean stock photo - BALL_LOCK_REQUIRED is what guards against noise, not this
-let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0, ballRadius=0.05, ballDetecting=false;
+let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0, ballRx=0.05, ballRy=0.05, ballDetecting=false;
 let lastBallDebug='';
 let lastBallDetectTime=null, avgBallMs=90; // the ball detector's OWN measured cadence - a full ML model call is much slower than a render frame, so it needs its own latency estimate rather than borrowing the pose loop's
 
+/* ---------- scan-derived color profile ----------
+   Captured once at the start of a session (see scanBtn handler below) by
+   sampling the actual ball the person holds up to the on-screen target
+   circle. This is a much tighter signal than any generic "orange" range
+   ever could be, since it's calibrated to this exact ball under this
+   exact lighting. It's used as a second detector that runs whenever
+   COCO-SSD doesn't find a "sports ball" that frame - the two together
+   give two independent ways to find the ball instead of depending
+   entirely on the trained model. */
+let scannedColor=null, ballScanned=false;
+const SCAN_CANVAS_W=200;
+const scanCanvas=document.createElement('canvas');
+const scanCtx=scanCanvas.getContext('2d',{willReadFrequently:true});
+function rgbToHsv(r,g,b){
+ const max=Math.max(r,g,b), min=Math.min(r,g,b), d=max-min;
+ if(max<1) return {h:0,s:0,v:max};
+ let h;
+ if(d<1) h=0;
+ else if(max===r) h=60*(((g-b)/d)%6);
+ else if(max===g) h=60*((b-r)/d+2);
+ else h=60*((r-g)/d+4);
+ if(h<0) h+=360;
+ return {h,s:d/max,v:max};
+}
+function hueDist(a,b){ const d=Math.abs(a-b); return Math.min(d,360-d); }
+function colorMatches(hsv,target,tol){
+ return hueDist(hsv.h,target.h)<tol.h && Math.abs(hsv.s-target.s)<tol.s && Math.abs(hsv.v-target.v)<tol.v;
+}
+// Fallback detector: scans the frame for pixels matching the specific
+// scanned ball color (tight tolerance, since it's calibrated) and takes
+// their centroid. Cheap single-pass scan, no connected-components needed -
+// the tight, calibrated color range does most of the false-positive
+// rejection that a generic color range never could.
+function scanFallback(video, prevBall){
+ if(!scannedColor || !video.videoWidth) return null;
+ const w=SCAN_CANVAS_W, h=Math.max(1,Math.round(SCAN_CANVAS_W*video.videoHeight/video.videoWidth));
+ if(scanCanvas.width!==w||scanCanvas.height!==h){scanCanvas.width=w;scanCanvas.height=h;}
+ scanCtx.drawImage(video,0,0,w,h);
+ let data; try{ data=scanCtx.getImageData(0,0,w,h).data; }catch(e){ return null; }
+ const tol={h:16,s:0.22,v:55};
+ let count=0,sumX=0,sumY=0;
+ for(let py=0;py<h;py++){
+  for(let px=0;px<w;px++){
+   const idx=(py*w+px)*4;
+   const hsv=rgbToHsv(data[idx],data[idx+1],data[idx+2]);
+   if(colorMatches(hsv,scannedColor,tol)){ count++; sumX+=px; sumY+=py; }
+  }
+ }
+ const minPixels=Math.max(8,w*h*0.0006);
+ if(count<minPixels) return null;
+ const cx=(sumX/count)/w, cy=(sumY/count)/h;
+ const r=Math.sqrt(count/Math.PI)/w;
+ return {x:cx,y:cy,rx:r,ry:r};
+}
+
 async function ballDetectLoop(){
- if(!running){ return; }
+ if(!running || !ballScanned){ requestAnimationFrame(ballDetectLoop); return; }
  if(!ballModelReady || ballDetecting || v.readyState<2){ requestAnimationFrame(ballDetectLoop); return; }
  ballDetecting=true;
  try{
@@ -226,10 +303,13 @@ async function ballDetectLoop(){
    const cx=(bx+bw/2)/v.videoWidth, cy=(by+bh/2)/v.videoHeight;
    let sc=p.score;
    if(prevBall) sc/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*4);
-   if(sc>bestScore){ bestScore=sc; best={x:cx,y:cy,r:Math.max(bw/v.videoWidth,bh/v.videoHeight)/2}; }
+   if(sc>bestScore){ bestScore=sc; best={x:cx,y:cy,rx:(bw/v.videoWidth)/2,ry:(bh/v.videoHeight)/2}; }
   }
+  // COCO-SSD found nothing this pass - try the calibrated color fallback
+  // before giving up on the frame entirely
+  if(!best) best=scanFallback(v,prevBall);
   if(best){
-   ballLockStreak++; ballLastRawSeen=now; ballRadius=best.r;
+   ballLockStreak++; ballLastRawSeen=now; ballRx=best.rx; ballRy=best.ry;
    if(ballLockStreak>=BALL_LOCK_REQUIRED) ballAcquired=true;
   } else {
    ballLockStreak=0;
@@ -335,12 +415,13 @@ function drawSkeleton(landmarks){
  x.restore();
 }
 function drawBall(ballPt){
- const r=Math.max(13, ballRadius*c.width);
+ const rx=Math.max(9, ballRx*c.width);
+ const ry=Math.max(9, ballRy*c.height);
  x.save();
  x.shadowColor='#ff8a00'; x.shadowBlur=ballPt.live?16:6;
  x.strokeStyle=ballPt.live?'#ff8a00':'#ffd54a';
  x.lineWidth=4;
- x.beginPath(); x.arc(ballPt.x*c.width, ballPt.y*c.height, r, 0, 7); x.stroke();
+ x.beginPath(); x.ellipse(ballPt.x*c.width, ballPt.y*c.height, rx, ry, 0, 0, 7); x.stroke();
  x.restore();
 }
 
@@ -418,7 +499,7 @@ function loop(){
     feedback.textContent=score>=90?'✓ '+msg:'• '+msg;
    }
    lastY=y;
-  } else {
+  } else if(ballScanned){
    status.textContent = ballModelFailed ? 'Ball model failed to load - check connection' : ballLockStreak>0 ? 'Locking onto ball…' : (ballModelReady ? 'Find the ball…' : 'Loading ball model…');
    feedback.textContent = lastBallDebug ? ('Make sure the ball is visible. (model sees: '+lastBallDebug+')') : 'Make sure the ball is visible and well lit.';
   }
@@ -434,19 +515,62 @@ start.onclick=async()=>{
   stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:60,max:60}},audio:false});
   try{const track=stream.getVideoTracks()[0], caps=track.getCapabilities?.(); if(caps?.zoom){const z=caps.zoom.min; await track.applyConstraints({advanced:[{zoom:z}]});}}catch(e){console.warn('0.5x zoom not supported on this camera',e);}
   v.srcObject=stream;await v.play();
-  running=true;startTime=Date.now();
-  start.disabled=true;stop.disabled=false;state.textContent='ON';status.textContent='Tracking…';
-  timer=setInterval(()=>{let s=Math.floor((Date.now()-startTime)/1000);time.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0')},500);
+  running=true;
+  start.disabled=true;stop.disabled=false;state.textContent='ON';
+  ballScanned=false;scannedColor=null;
+  scanOverlay.style.display='flex';
+  scanMsg.textContent='Hold your ball inside the circle, then tap Scan';
+  status.textContent='Scan your ball to begin';
   rafId=requestAnimationFrame(loop);
   requestAnimationFrame(ballDetectLoop);
  }catch(e){status.textContent='Camera blocked';feedback.textContent='Allow camera access, then try again.';console.error(e);}
 };
+
+scanBtn.onclick=()=>{
+ if(!v.videoWidth){ scanMsg.textContent='Camera not ready yet - try again in a second.'; return; }
+ scanMsg.textContent='Scanning…';
+ const sw=140, sh=Math.round(140*v.videoHeight/v.videoWidth);
+ const sc=document.createElement('canvas'); sc.width=sw; sc.height=sh;
+ const sctx=sc.getContext('2d');
+ sctx.drawImage(v,0,0,sw,sh);
+ let data;
+ try{ data=sctx.getImageData(0,0,sw,sh).data; }catch(e){ scanMsg.textContent='Scan failed - try again.'; return; }
+ // sample a circle at the center, matching the on-screen guide ring
+ const ccx=sw/2, ccy=sh/2, radius=Math.min(sw,sh)*0.24;
+ let sumH=0,sumS=0,sumV=0,count=0; const hues=[];
+ for(let py=0;py<sh;py++){
+  for(let px=0;px<sw;px++){
+   if(Math.hypot(px-ccx,py-ccy)>radius) continue;
+   const idx=(py*sw+px)*4;
+   const hsv=rgbToHsv(data[idx],data[idx+1],data[idx+2]);
+   sumH+=hsv.h; sumS+=hsv.s; sumV+=hsv.v; count++; hues.push(hsv.h);
+  }
+ }
+ if(count<10){ scanMsg.textContent='Could not read that area - try again.'; return; }
+ const avgH=sumH/count, avgS=sumS/count, avgV=sumV/count;
+ // sanity check: a real ball fully filling the circle should read as one
+ // fairly consistent color, not a scattered mix of background objects
+ let variance=0; for(const hh of hues) variance+=hueDist(hh,avgH)**2; variance/=count;
+ if(Math.sqrt(variance)>40 || avgS<0.15){
+  scanMsg.textContent="Couldn't get a clear read - center the ball fully in the circle and try again.";
+  return;
+ }
+ scannedColor={h:avgH,s:avgS,v:avgV};
+ ballScanned=true;
+ scanOverlay.style.display='none';
+ startTime=Date.now();
+ status.textContent='Tracking…';
+ feedback.textContent='Ball recognized - start dribbling!';
+ timer=setInterval(()=>{let s=Math.floor((Date.now()-startTime)/1000);time.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0')},500);
+};
+
 stop.onclick=()=>{
- running=false;
+ running=false;ballScanned=false;scannedColor=null;
  if(rafId) cancelAnimationFrame(rafId);
  if(stream) stream.getTracks().forEach(t=>t.stop());
  v.srcObject=null;
  start.disabled=false;stop.disabled=true;state.textContent='OFF';predBadge.textContent='';
+ scanOverlay.style.display='none';
  updateLoadStatus();
  clearInterval(timer);
 };
