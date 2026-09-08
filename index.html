@@ -33,7 +33,7 @@ canvas{z-index:2}
 .badge{position:absolute;z-index:3;top:9px;left:9px;background:#000c;border-radius:11px;padding:6px 10px;font-weight:800;font-size:11.5px}
 .badge2{position:absolute;z-index:3;top:9px;right:9px;background:#000c;border-radius:11px;padding:6px 10px;font-weight:800;font-size:11.5px}
 
-.panel{flex:1;display:flex;flex-direction:column;min-width:0;height:100%;gap:7px}
+.panel{flex:1;display:flex;flex-direction:column;min-width:0;height:100%;gap:7px;overflow-y:auto;overflow-x:hidden;padding-right:2px;-webkit-overflow-scrolling:touch}
 .head{display:flex;justify-content:space-between;align-items:center;flex:0 0 auto}
 h1{font-size:17px;margin:0;line-height:1.15}
 .muted{color:#999;font-size:10px}
@@ -45,7 +45,7 @@ h1{font-size:17px;margin:0;line-height:1.15}
 .num{font-size:18px;font-weight:850;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 .feedback{background:#151515;border-radius:12px;padding:9px 11px;font-weight:700;font-size:12px;flex:1;min-height:0;overflow:hidden;display:flex;align-items:center;line-height:1.35}
-.controls{display:grid;grid-template-columns:1fr 1fr;gap:6px;flex:0 0 auto}
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:6px;flex:0 0 auto}.controls.single{grid-template-columns:1fr}
 button{border:0;border-radius:12px;padding:10px;font-size:13.5px;font-weight:800;width:100%}
 button{background:#fff;color:#000}
 .secondary{background:#222;color:#fff}
@@ -89,7 +89,7 @@ button{background:#fff;color:#000}
    <div class="card"><div class="label">MOVES</div><div class="num" id="moveCount">0</div></div>
   </div>
   <div class="feedback" id="feedback">Start the camera — reps and moves are detected automatically from the ball and your body, nothing to select.</div>
-  <div class="controls"><button id="start">Start Camera</button><button id="stop" class="secondary" disabled>Stop</button></div>
+  <div class="controls single"><button id="start">Start Camera</button></div>
   <button id="reset" class="secondary">Reset</button>
   <div class="small">Prop the phone up landscape, use good lighting, stand 6–10 ft back so your full body is in frame.</div>
  </div>
@@ -236,70 +236,15 @@ function updateLoadStatus(){
  if(!running) status.textContent = (poseReady&&ballModelReady) ? 'Models ready' : 'Loading models…';
 }
 
-const BALL_LOCK_REQUIRED=2;       // consecutive real detections needed before we trust/show the ball
+const BALL_LOCK_REQUIRED=1;       // consecutive real detections needed before we trust/show the ball
 const BALL_LOST_TIMEOUT_MS=1200;  // how long without a real detection before the lock drops and it has to re-acquire
-const BALL_MIN_SCORE=0.2;         // a real basketball mid-dribble (motion blur, partly gripped by a hand) often scores lower confidence than a clean stock photo - BALL_LOCK_REQUIRED is what guards against noise, not this
+const BALL_MIN_SCORE=0.12;         // a real basketball mid-dribble (motion blur, partly gripped by a hand) often scores lower confidence than a clean stock photo - BALL_LOCK_REQUIRED is what guards against noise, not this
 let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0, ballRx=0.05, ballRy=0.05, ballDetecting=false;
 let lastBallDebug='';
-let lastBallDetectTime=null, avgBallMs=90; // the ball detector's OWN measured cadence - a full ML model call is much slower than a render frame, so it needs its own latency estimate rather than borrowing the pose loop's
-
-/* ---------- scan-derived color profile ----------
-   Captured once at the start of a session (see scanBtn handler below) by
-   sampling the actual ball the person holds up to the on-screen target
-   circle. This is a much tighter signal than any generic "orange" range
-   ever could be, since it's calibrated to this exact ball under this
-   exact lighting. It's used as a second detector that runs whenever
-   COCO-SSD doesn't find a "sports ball" that frame - the two together
-   give two independent ways to find the ball instead of depending
-   entirely on the trained model. */
-let scannedColor=null, ballScanned=false;
-const SCAN_CANVAS_W=200;
-const scanCanvas=document.createElement('canvas');
-const scanCtx=scanCanvas.getContext('2d',{willReadFrequently:true});
-function rgbToHsv(r,g,b){
- const max=Math.max(r,g,b), min=Math.min(r,g,b), d=max-min;
- if(max<1) return {h:0,s:0,v:max};
- let h;
- if(d<1) h=0;
- else if(max===r) h=60*(((g-b)/d)%6);
- else if(max===g) h=60*((b-r)/d+2);
- else h=60*((r-g)/d+4);
- if(h<0) h+=360;
- return {h,s:d/max,v:max};
-}
-function hueDist(a,b){ const d=Math.abs(a-b); return Math.min(d,360-d); }
-function colorMatches(hsv,target,tol){
- return hueDist(hsv.h,target.h)<tol.h && Math.abs(hsv.s-target.s)<tol.s && Math.abs(hsv.v-target.v)<tol.v;
-}
-// Fallback detector: scans the frame for pixels matching the specific
-// scanned ball color (tight tolerance, since it's calibrated) and takes
-// their centroid. Cheap single-pass scan, no connected-components needed -
-// the tight, calibrated color range does most of the false-positive
-// rejection that a generic color range never could.
-function scanFallback(video, prevBall){
- if(!scannedColor || !video.videoWidth) return null;
- const w=SCAN_CANVAS_W, h=Math.max(1,Math.round(SCAN_CANVAS_W*video.videoHeight/video.videoWidth));
- if(scanCanvas.width!==w||scanCanvas.height!==h){scanCanvas.width=w;scanCanvas.height=h;}
- scanCtx.drawImage(video,0,0,w,h);
- let data; try{ data=scanCtx.getImageData(0,0,w,h).data; }catch(e){ return null; }
- const tol={h:16,s:0.22,v:55};
- let count=0,sumX=0,sumY=0;
- for(let py=0;py<h;py++){
-  for(let px=0;px<w;px++){
-   const idx=(py*w+px)*4;
-   const hsv=rgbToHsv(data[idx],data[idx+1],data[idx+2]);
-   if(colorMatches(hsv,scannedColor,tol)){ count++; sumX+=px; sumY+=py; }
-  }
- }
- const minPixels=Math.max(8,w*h*0.0006);
- if(count<minPixels) return null;
- const cx=(sumX/count)/w, cy=(sumY/count)/h;
- const r=Math.sqrt(count/Math.PI)/w;
- return {x:cx,y:cy,rx:r,ry:r};
-}
+let lastBallDetectTime=null, avgBallMs=50; // the ball detector's OWN measured cadence - a full ML model call is much slower than a render frame, so it needs its own latency estimate rather than borrowing the pose loop's
 
 async function ballDetectLoop(){
- if(!running || !ballScanned){ requestAnimationFrame(ballDetectLoop); return; }
+ if(!running){ requestAnimationFrame(ballDetectLoop); return; }
  if(!ballModelReady || ballDetecting || v.readyState<2){ requestAnimationFrame(ballDetectLoop); return; }
  ballDetecting=true;
  try{
@@ -468,7 +413,7 @@ function loop(){
   for(const i of poseIdx) poseArr[i]=P('pose'+i).predict(Math.min(avgFrameMs,80));
   drawSkeleton(poseArr);
 
-  const ballLookahead=Math.min(avgBallMs,200);
+  const ballLookahead=Math.min(avgBallMs,120);
   const ballPt = ballAcquired ? P('ball').predict(ballLookahead) : null;
   if(ballPt) drawBall(ballPt);
 
@@ -511,7 +456,7 @@ function loop(){
     feedback.textContent=score>=90?'✓ '+msg:'• '+msg;
    }
    lastY=y;
-  } else if(ballScanned){
+  } else {
    status.textContent = ballModelFailed ? 'Ball model failed to load - check connection' : ballLockStreak>0 ? 'Locking onto ball…' : (ballModelReady ? 'Find the ball…' : 'Loading ball model…');
    feedback.textContent = lastBallDebug ? ('Make sure the ball is visible. (model sees: '+lastBallDebug+')') : 'Make sure the ball is visible and well lit.';
   }
@@ -524,7 +469,7 @@ function loop(){
 /* ---------- controls ---------- */
 start.onclick=async()=>{
  try{
-  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:60,max:60}},audio:false});
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:60,max:60}},audio:false});
   try{const track=stream.getVideoTracks()[0], caps=track.getCapabilities?.(); if(caps?.zoom){const z=caps.zoom.min; await track.applyConstraints({advanced:[{zoom:z}]});}}catch(e){console.warn('0.5x zoom not supported on this camera',e);}
   v.srcObject=stream;await v.play();
   running=true;
@@ -538,54 +483,6 @@ start.onclick=async()=>{
  }catch(e){status.textContent='Camera blocked';feedback.textContent='Allow camera access, then try again.';console.error(e);}
 };
 
-scanBtn.onclick=()=>{
- if(!v.videoWidth){ scanMsg.textContent='Camera not ready yet - try again in a second.'; return; }
- scanMsg.textContent='Scanning…';
- const sw=140, sh=Math.round(140*v.videoHeight/v.videoWidth);
- const sc=document.createElement('canvas'); sc.width=sw; sc.height=sh;
- const sctx=sc.getContext('2d');
- sctx.drawImage(v,0,0,sw,sh);
- let data;
- try{ data=sctx.getImageData(0,0,sw,sh).data; }catch(e){ scanMsg.textContent='Scan failed - try again.'; return; }
- // sample a circle at the center, matching the on-screen guide ring
- const ccx=sw/2, ccy=sh/2, radius=Math.min(sw,sh)*0.24;
- let sumH=0,sumS=0,sumV=0,count=0; const hues=[];
- for(let py=0;py<sh;py++){
-  for(let px=0;px<sw;px++){
-   if(Math.hypot(px-ccx,py-ccy)>radius) continue;
-   const idx=(py*sw+px)*4;
-   const hsv=rgbToHsv(data[idx],data[idx+1],data[idx+2]);
-   sumH+=hsv.h; sumS+=hsv.s; sumV+=hsv.v; count++; hues.push(hsv.h);
-  }
- }
- if(count<10){ scanMsg.textContent='Could not read that area - try again.'; return; }
- const avgH=sumH/count, avgS=sumS/count, avgV=sumV/count;
- // sanity check: a real ball fully filling the circle should read as one
- // fairly consistent color, not a scattered mix of background objects
- let variance=0; for(const hh of hues) variance+=hueDist(hh,avgH)**2; variance/=count;
- if(Math.sqrt(variance)>40 || avgS<0.15){
-  scanMsg.textContent="Couldn't get a clear read - center the ball fully in the circle and try again.";
-  return;
- }
- scannedColor={h:avgH,s:avgS,v:avgV};
- ballScanned=true;
- scanOverlay.style.display='none';
- startTime=Date.now();
- status.textContent='Tracking…';
- feedback.textContent='Ball recognized - start dribbling!';
- timer=setInterval(()=>{let s=Math.floor((Date.now()-startTime)/1000);time.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0')},500);
-};
-
-stop.onclick=()=>{
- running=false;ballScanned=false;scannedColor=null;
- if(rafId) cancelAnimationFrame(rafId);
- if(stream) stream.getTracks().forEach(t=>t.stop());
- v.srcObject=null;
- start.disabled=false;stop.disabled=true;state.textContent='OFF';predBadge.textContent='';
- scanOverlay.style.display='none';
- updateLoadStatus();
- clearInterval(timer);
-};
 reset.onclick=()=>{
  times=[];lastY=null;lastDir=0;score=100;moveCount=0;sideState=null;moveState='neutral';
  approaching=false;approachSide=null;hesitationFlag=false;
