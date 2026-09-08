@@ -91,6 +91,9 @@ import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@m
 
 const v=document.getElementById('video'),c=document.getElementById('canvas'),x=c.getContext('2d');
 const status=document.getElementById('status'),feedback=document.getElementById('feedback'),predBadge=document.getElementById('predBadge');
+const start=document.getElementById('start'), stop=document.getElementById('stop'), reset=document.getElementById('reset');
+const state=document.getElementById('state'), time=document.getElementById('time'), rpm=document.getElementById('rpm');
+const hand=document.getElementById('hand'), scoreEl=document.getElementById('score'), lastMove=document.getElementById('lastMove'), moveCountEl=document.getElementById('moveCount'), mode=document.getElementById('mode');
 let running=false,stream=null,rafId=null;
 
 // Belt-and-suspenders viewport sizing: pin .app to real pixel dimensions
@@ -382,16 +385,7 @@ function drawSkeleton(landmarks){
  }
  x.restore();
 }
-function drawBall(ballPt){
- const rx=Math.max(9, ballRx*c.width);
- const ry=Math.max(9, ballRy*c.height);
- x.save();
- x.shadowColor='#ff8a00'; x.shadowBlur=ballPt.live?16:6;
- x.strokeStyle=ballPt.live?'#ff8a00':'#ffd54a';
- x.lineWidth=4;
- x.beginPath(); x.ellipse(ballPt.x*c.width, ballPt.y*c.height, rx, ry, 0, 0, 7); x.stroke();
- x.restore();
-}
+
 
 let lastFrameTime=null, avgFrameMs=20;
 
