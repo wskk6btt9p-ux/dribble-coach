@@ -491,32 +491,21 @@ function loop(){
 /* ---------- controls ---------- */
 start.onclick=async()=>{
  try{
-  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:30,max:60}},audio:false});
-  try{const track=stream.getVideoTracks()[0], caps=track.getCapabilities?.(); if(caps?.zoom){const z=caps.zoom.min; await track.applyConstraints({advanced:[{zoom:z}]});}}catch(e){console.warn('0.5x zoom not supported on this camera',e);}
+  if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera API unavailable. Open the GitHub Pages site in Safari over HTTPS.');
+  status.textContent='Requesting camera…'; feedback.textContent='Waiting for camera permission…';
+  stream=await navigator.mediaDevices.getUserMedia({video:true,audio:false});
   v.srcObject=stream;
-  if(v.readyState<2) await new Promise(resolve=>{v.onloadedmetadata=resolve;});
-  await v.play();
-  running=true;
-  start.disabled=true;state.textContent='ON';
-  status.textContent='Finding ball…';
-  feedback.textContent='Ball tracking is automatic — start dribbling!';
-  rafId=requestAnimationFrame(loop);
+  await new Promise((resolve,reject)=>{const t=setTimeout(()=>reject(new Error('Camera did not become ready.')),8000); v.onloadedmetadata=()=>{clearTimeout(t);resolve();};});
+  await v.play(); running=true; startTime=Date.now(); start.disabled=true; if(stop) stop.disabled=false;
+  state.textContent='ON'; status.textContent='Finding ball…'; feedback.textContent='Camera is on — move the ball into view.';
+  clearInterval(timer); timer=setInterval(()=>{let sec=Math.floor((Date.now()-startTime)/1000);time.textContent=Math.floor(sec/60)+':'+String(sec%60).padStart(2,'0')},500);
+  if(rafId) cancelAnimationFrame(rafId); rafId=requestAnimationFrame(loop);
  }catch(e){
-  console.error('Camera start error:',e);
-  const name=e?.name||'';
-  if(name==='NotAllowedError' || name==='SecurityError'){
-   status.textContent='Camera permission needed';
-   feedback.textContent='Allow camera access for this website in Safari Settings, then tap Start Camera again.';
-  }else if(name==='NotFoundError'){
-   status.textContent='No camera found';
-   feedback.textContent='No usable camera was found on this device.';
-  }else if(name==='NotReadableError' || name==='TrackStartError'){
-   status.textContent='Camera busy';
-   feedback.textContent='Another app may be using the camera. Close it and try again.';
-  }else{
-   status.textContent='Camera error';
-   feedback.textContent='Camera error: '+(e?.message||name||'unknown error');
-  }
+  console.error('Camera start error:',e); if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;} v.srcObject=null; start.disabled=false;
+  if(e?.name==='NotAllowedError'||e?.name==='SecurityError'){status.textContent='Camera permission denied';feedback.textContent='Allow camera access for this website in Safari, then reload the page and tap Start Camera again.';}
+  else if(e?.name==='NotFoundError'){status.textContent='No camera found';feedback.textContent='No camera was available on this device.';}
+  else if(e?.name==='NotReadableError'||e?.name==='TrackStartError'){status.textContent='Camera busy';feedback.textContent='Another app may be using the camera. Close it and try again.';}
+  else {status.textContent='Camera error';feedback.textContent=e?.message||'Could not start the camera.';}
  }
 };
 
