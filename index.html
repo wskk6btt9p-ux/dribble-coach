@@ -473,11 +473,11 @@ start.onclick=async()=>{
   try{const track=stream.getVideoTracks()[0], caps=track.getCapabilities?.(); if(caps?.zoom){const z=caps.zoom.min; await track.applyConstraints({advanced:[{zoom:z}]});}}catch(e){console.warn('0.5x zoom not supported on this camera',e);}
   v.srcObject=stream;await v.play();
   running=true;
-  start.disabled=true;stop.disabled=false;state.textContent='ON';
-  ballScanned=false;scannedColor=null;
-  scanOverlay.style.display='flex';
-  scanMsg.textContent='Hold your ball inside the circle, then tap Scan';
-  status.textContent='Scan your ball to begin';
+  start.disabled=true;state.textContent='ON';
+  ballScanned=true;scannedColor=null;
+  scanOverlay.style.display='none';
+  status.textContent='Finding ball…';
+  feedback.textContent='Ball tracking is automatic — start dribbling!';
   rafId=requestAnimationFrame(loop);
   requestAnimationFrame(ballDetectLoop);
  }catch(e){status.textContent='Camera blocked';feedback.textContent='Allow camera access, then try again.';console.error(e);}
