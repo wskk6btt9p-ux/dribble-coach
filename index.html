@@ -51,11 +51,6 @@ button{background:#fff;color:#000}
 .secondary{background:#222;color:#fff}
 .small{color:#666;font-size:9px;line-height:1.35;text-align:center;flex:0 0 auto}
 
-/* ---- ball-scan step: shown after the camera starts, before tracking begins ---- */
-.scan-overlay{position:absolute;inset:0;z-index:4;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#000a}
-.scan-ring{width:34vh;height:34vh;max-width:55%;max-height:55%;border:3px dashed #fffb;border-radius:50%;box-shadow:0 0 0 2000px #0000}
-.scan-msg{color:#fff;font-weight:800;font-size:13px;background:#000d;padding:9px 15px;border-radius:12px;text-align:center;max-width:85%;line-height:1.4}
-.scan-overlay button{width:auto;padding:12px 28px}
 </style>
 </head>
 <body>
@@ -72,11 +67,7 @@ button{background:#fff;color:#000}
   <canvas id="canvas"></canvas>
   <div class="badge" id="status">Camera off</div>
   <div class="badge2" id="predBadge"></div>
-  <div class="scan-overlay" id="scanOverlay">
-   <div class="scan-ring"></div>
-   <div class="scan-msg" id="scanMsg">Hold your ball inside the circle, then tap Scan</div>
-   <button id="scanBtn">Scan Ball</button>
-  </div>
+
  </div>
  <div class="panel">
   <div class="head"><div><h1>🏀 Dribble Coach</h1><div class="muted">Live camera training</div></div><div id="state">OFF</div></div>
@@ -262,9 +253,6 @@ async function ballDetectLoop(){
    if(prevBall) sc/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*4);
    if(sc>bestScore){ bestScore=sc; best={x:cx,y:cy,rx:(bw/v.videoWidth)/2,ry:(bh/v.videoHeight)/2}; }
   }
-  // COCO-SSD found nothing this pass - try the calibrated color fallback
-  // before giving up on the frame entirely
-  if(!best) best=scanFallback(v,prevBall);
   if(best){
    ballLockStreak++; ballLastRawSeen=now; ballRx=best.rx; ballRy=best.ry;
    if(ballLockStreak>=BALL_LOCK_REQUIRED) ballAcquired=true;
@@ -469,18 +457,34 @@ function loop(){
 /* ---------- controls ---------- */
 start.onclick=async()=>{
  try{
-  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:60,max:60}},audio:false});
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:30,max:60}},audio:false});
   try{const track=stream.getVideoTracks()[0], caps=track.getCapabilities?.(); if(caps?.zoom){const z=caps.zoom.min; await track.applyConstraints({advanced:[{zoom:z}]});}}catch(e){console.warn('0.5x zoom not supported on this camera',e);}
-  v.srcObject=stream;await v.play();
+  v.srcObject=stream;
+  if(v.readyState<2) await new Promise(resolve=>{v.onloadedmetadata=resolve;});
+  await v.play();
   running=true;
   start.disabled=true;state.textContent='ON';
-  ballScanned=true;scannedColor=null;
-  scanOverlay.style.display='none';
   status.textContent='Finding ball…';
   feedback.textContent='Ball tracking is automatic — start dribbling!';
   rafId=requestAnimationFrame(loop);
   requestAnimationFrame(ballDetectLoop);
- }catch(e){status.textContent='Camera blocked';feedback.textContent='Allow camera access, then try again.';console.error(e);}
+ }catch(e){
+  console.error('Camera start error:',e);
+  const name=e?.name||'';
+  if(name==='NotAllowedError' || name==='SecurityError'){
+   status.textContent='Camera permission needed';
+   feedback.textContent='Allow camera access for this website in Safari Settings, then tap Start Camera again.';
+  }else if(name==='NotFoundError'){
+   status.textContent='No camera found';
+   feedback.textContent='No usable camera was found on this device.';
+  }else if(name==='NotReadableError' || name==='TrackStartError'){
+   status.textContent='Camera busy';
+   feedback.textContent='Another app may be using the camera. Close it and try again.';
+  }else{
+   status.textContent='Camera error';
+   feedback.textContent='Camera error: '+(e?.message||name||'unknown error');
+  }
+ }
 };
 
 reset.onclick=()=>{
