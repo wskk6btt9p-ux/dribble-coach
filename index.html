@@ -86,8 +86,6 @@ button{background:#fff;color:#000}
  </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 <script type="module">
 import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
@@ -205,78 +203,92 @@ async function initPose(){
 }
 initPose().catch(e=>{status.textContent='Pose model failed';console.error(e);});
 
-/* ---------- ball model: a real trained object detector (COCO-SSD,
-   "sports ball" class) instead of a hand-tuned color/shape heuristic.
-   This is the actual fix for "detects my head/hand as the ball" - a
-   trained detector recognizes what a ball actually looks like in
-   context, rather than guessing from hue and blob shape, so it doesn't
-   confuse skin, faces, or stray objects with it the way a color filter
-   inevitably can. It's slower per-call than the old color scan, so
-   detection runs in its own loop, decoupled from the render loop - the
-   predictor's forward lookahead fills in the gaps between real
-   detections, same as before. */
-let ballModel=null, ballModelReady=false;
-async function initBallModel(){
- ballModel=await cocoSsd.load({base:'lite_mobilenet_v2'});
- ballModelReady=true;
- updateLoadStatus();
+/* ---------- ball tracking (color-blob detector) ----------
+   Downsamples the current video frame to a small offscreen canvas,
+   finds every connected blob matching a basketball-orange hue/saturation
+   range, then filters candidates by size, solidity (fill ratio) and
+   roundness (aspect ratio) - a ball is a compact, filled circle, while a
+   hand or forearm (which can share a similar hue under warm lighting) is
+   thin/elongated and less solid. Among the surviving candidates it favors
+   whichever is closest to where the ball was last seen, so it doesn't
+   jump to a hand passing through frame. The result feeds the same
+   PointPredictor used for skeleton points, so the ball also gets
+   predictive smoothing and survives brief occlusion. */
+let ballRadius=0.03;
+const ballCanvas=document.createElement('canvas');
+const ballCtx=ballCanvas.getContext('2d',{willReadFrequently:true});
+const BALL_SAMPLE_W=160;
+function isOrange(r,g,b){
+ const max=Math.max(r,g,b), min=Math.min(r,g,b);
+ if(max<60) return false;
+ const d=max-min;
+ if(d<25) return false;
+ let h;
+ if(max===r) h=60*(((g-b)/d)%6);
+ else if(max===g) h=60*((b-r)/d+2);
+ else h=60*((r-g)/d+4);
+ if(h<0) h+=360;
+ const sat=d/max;
+ return h>=6 && h<=30 && sat>0.52 && max>75;
 }
-let ballModelFailed=false;
-initBallModel().catch(e=>{console.error(e); ballModelFailed=true; if(!running) status.textContent='Ball model failed to load';});
-function updateLoadStatus(){
- if(!running) status.textContent = (poseReady&&ballModelReady) ? 'Models ready' : 'Loading models…';
+function detectBall(video, prevBall){
+ if(!video.videoWidth) return null;
+ const w=BALL_SAMPLE_W, h=Math.max(1,Math.round(BALL_SAMPLE_W*video.videoHeight/video.videoWidth));
+ if(ballCanvas.width!==w||ballCanvas.height!==h){ballCanvas.width=w;ballCanvas.height=h;}
+ ballCtx.drawImage(video,0,0,w,h);
+ let data;
+ try{ data=ballCtx.getImageData(0,0,w,h).data; }catch(e){ return null; }
+
+ const n=w*h;
+ const mask=new Uint8Array(n);
+ for(let i=0;i<n;i++){
+  const idx=i*4;
+  if(isOrange(data[idx],data[idx+1],data[idx+2])) mask[i]=1;
+ }
+
+ const visited=new Uint8Array(n);
+ const stack=new Int32Array(n);
+ let best=null, bestScore=-Infinity;
+
+ for(let start=0;start<n;start++){
+  if(!mask[start]||visited[start]) continue;
+  let sp=0; stack[sp++]=start; visited[start]=1;
+  let count=0,sumX=0,sumY=0,minX=w,maxX=0,minY=h,maxY=0;
+  while(sp>0){
+   const p=stack[--sp];
+   const py=(p/w)|0, px=p-py*w;
+   count++; sumX+=px; sumY+=py;
+   if(px<minX)minX=px; if(px>maxX)maxX=px;
+   if(py<minY)minY=py; if(py>maxY)maxY=py;
+   if(px>0){const q=p-1; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
+   if(px<w-1){const q=p+1; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
+   if(py>0){const q=p-w; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
+   if(py<h-1){const q=p+w; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
+  }
+  const bw=maxX-minX+1, bh=maxY-minY+1;
+  const fill=count/(bw*bh);
+  const aspect=Math.max(bw,bh)/Math.max(1,Math.min(bw,bh));
+  if(count<Math.max(12,n*0.003)) continue;   // speck of noise
+  if(bw>w*0.6||bh>h*0.6) continue;           // too big to be just the ball
+  if(fill<0.45) continue;                    // hollow/irregular shape (fingers, edges)
+  if(aspect>1.9) continue;                   // too elongated to be round (arm/forearm)
+  const cx=(sumX/count)/w, cy=(sumY/count)/h;
+  let score=count*fill;
+  if(prevBall) score/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*8);
+  if(score>bestScore){ bestScore=score; best={x:cx,y:cy,r:Math.sqrt(count/Math.PI)/w}; }
+ }
+ if(best) ballRadius=best.r;
+ return best;
+}
+function drawBall(ballPt){
+ const r=Math.max(10, ballRadius*c.width);
+ x.strokeStyle = ballPt.live ? '#ff8a00' : '#ffd54a';
+ x.lineWidth=4;
+ x.beginPath();
+ x.arc(ballPt.x*c.width, ballPt.y*c.height, r, 0, 7);
+ x.stroke();
 }
 
-const BALL_LOCK_REQUIRED=1;       // consecutive real detections needed before we trust/show the ball
-const BALL_LOST_TIMEOUT_MS=1200;  // how long without a real detection before the lock drops and it has to re-acquire
-const BALL_MIN_SCORE=0.12;         // a real basketball mid-dribble (motion blur, partly gripped by a hand) often scores lower confidence than a clean stock photo - BALL_LOCK_REQUIRED is what guards against noise, not this
-let ballLockStreak=0, ballAcquired=false, ballLastRawSeen=0, ballRx=0.05, ballRy=0.05, ballDetecting=false;
-let lastBallDebug='';
-let lastBallDetectTime=null, avgBallMs=50; // the ball detector's OWN measured cadence - a full ML model call is much slower than a render frame, so it needs its own latency estimate rather than borrowing the pose loop's
-
-async function ballDetectLoop(){
- if(!running){ requestAnimationFrame(ballDetectLoop); return; }
- if(!ballModelReady || ballDetecting || v.readyState<2){ requestAnimationFrame(ballDetectLoop); return; }
- ballDetecting=true;
- try{
-  const preds=await ballModel.detect(v);
-  const now=performance.now();
-  if(lastBallDetectTime!==null) avgBallMs=avgBallMs*0.8+(now-lastBallDetectTime)*0.2;
-  lastBallDetectTime=now;
-  const prevBall=P('ball').get();
-  let best=null,bestScore=-Infinity;
-  for(const p of preds){
-   if(p.class!=='sports ball' || p.score<BALL_MIN_SCORE) continue;
-   const [bx,by,bw,bh]=p.bbox;
-   const cx=(bx+bw/2)/v.videoWidth, cy=(by+bh/2)/v.videoHeight;
-   let sc=p.score;
-   if(prevBall) sc/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*4);
-   if(sc>bestScore){ bestScore=sc; best={x:cx,y:cy,rx:(bw/v.videoWidth)/2,ry:(bh/v.videoHeight)/2}; }
-  }
-  if(best){
-   ballLockStreak++; ballLastRawSeen=now; ballRx=best.rx; ballRy=best.ry;
-   if(ballLockStreak>=BALL_LOCK_REQUIRED) ballAcquired=true;
-  } else {
-   ballLockStreak=0;
-   if(now-ballLastRawSeen>BALL_LOST_TIMEOUT_MS) ballAcquired=false;
-   // diagnostic: show what the model actually saw this pass, so it's
-   // visible whether it's finding nothing at all, finding other objects
-   // but never "sports ball", or finding a sports ball just under the
-   // score threshold - instead of guessing at the number again blind
-   if(!ballAcquired){
-    if(!preds.length) lastBallDebug='sees nothing';
-    else{
-     const top=preds.reduce((a,b)=>b.score>a.score?b:a);
-     const ballPred=preds.filter(p=>p.class==='sports ball').sort((a,b)=>b.score-a.score)[0];
-     lastBallDebug='top: '+top.class+' '+Math.round(top.score*100)+'%'+(ballPred?' · ball: '+Math.round(ballPred.score*100)+'%':'');
-    }
-   }
-  }
-  P('ball').update(best?best.x:undefined, best?best.y:undefined, now, !!best);
- }catch(e){ console.error(e); }
- ballDetecting=false;
- if(running) requestAnimationFrame(ballDetectLoop);
-}
 
 /* ---------- dribble move classification ----------
    Fully automatic - there is no manual mode/setting. Builds a live
@@ -372,7 +384,7 @@ function drawBall(ballPt){
 
 let lastFrameTime=null, avgFrameMs=20;
 
-/* ---------- main render loop (body pose; ball detection runs in its own loop above) ---------- */
+/* ---------- main render loop (body pose + ball ESP) ---------- */
 function loop(){
  if(!running){ return; }
  const vw=v.videoWidth||1280, vh=v.videoHeight||720;
@@ -401,12 +413,23 @@ function loop(){
   for(const i of poseIdx) poseArr[i]=P('pose'+i).predict(Math.min(avgFrameMs,80));
   drawSkeleton(poseArr);
 
-  const ballLookahead=Math.min(avgBallMs,120);
-  const ballPt = ballAcquired ? P('ball').predict(ballLookahead) : null;
+  // Ball ESP: use the color/shape detector from the proven front build.
+  const prevBall=P('ball').get();
+  const ballSeen=detectBall(v,prevBall);
+  if(ballSeen){
+   ballLockStreak++;
+   ballLastRawSeen=now;
+   if(ballLockStreak>=BALL_LOCK_REQUIRED) ballAcquired=true;
+  }else{
+   ballLockStreak=0;
+   if(now-ballLastRawSeen>BALL_LOST_TIMEOUT_MS) ballAcquired=false;
+  }
+  P('ball').update(ballSeen?ballSeen.x:undefined,ballSeen?ballSeen.y:undefined,now,!!ballSeen);
+  const ballPt=ballAcquired?P('ball').predict(BALL_LOOKAHEAD_MS):null;
   if(ballPt) drawBall(ballPt);
 
   let tracked=ballPt;
-  anyPredicted = tracked && !tracked.live;
+  anyPredicted=!!tracked&&!tracked.live;
 
   const ls=poseArr[11],rs=poseArr[12],lh=poseArr[23],rh=poseArr[24],lk=poseArr[25],rk=poseArr[26];
   let bodyFrame=null;
@@ -445,8 +468,8 @@ function loop(){
    }
    lastY=y;
   } else {
-   status.textContent = ballModelFailed ? 'Ball model failed to load - check connection' : ballLockStreak>0 ? 'Locking onto ball…' : (ballModelReady ? 'Find the ball…' : 'Loading ball model…');
-   feedback.textContent = lastBallDebug ? ('Make sure the ball is visible. (model sees: '+lastBallDebug+')') : 'Make sure the ball is visible and well lit.';
+   status.textContent = ballLockStreak>0 ? 'Locking onto ball…' : 'Find the ball…';
+   feedback.textContent = 'Make sure the ball is visible and well lit.';
   }
  }
 
@@ -467,7 +490,6 @@ start.onclick=async()=>{
   status.textContent='Finding ball…';
   feedback.textContent='Ball tracking is automatic — start dribbling!';
   rafId=requestAnimationFrame(loop);
-  requestAnimationFrame(ballDetectLoop);
  }catch(e){
   console.error('Camera start error:',e);
   const name=e?.name||'';
