@@ -203,34 +203,16 @@ async function initPose(){
 }
 initPose().catch(e=>{status.textContent='Pose model failed';console.error(e);});
 
-/* ---------- ball tracking (color-blob detector) ----------
-   Downsamples the current video frame to a small offscreen canvas,
-   finds every connected blob matching a basketball-orange hue/saturation
-   range, then filters candidates by size, solidity (fill ratio) and
-   roundness (aspect ratio) - a ball is a compact, filled circle, while a
-   hand or forearm (which can share a similar hue under warm lighting) is
-   thin/elongated and less solid. Among the surviving candidates it favors
-   whichever is closest to where the ball was last seen, so it doesn't
-   jump to a hand passing through frame. The result feeds the same
-   PointPredictor used for skeleton points, so the ball also gets
-   predictive smoothing and survives brief occlusion. */
+/* ---------- ball tracking (shape-only circle detector) ----------
+   No basketball color is required. The detector builds a brightness/contrast
+   mask, finds compact blobs, then keeps only candidates whose geometry is
+   very close to a circle: nearly equal width/height, high fill, and strong
+   circularity. This makes the ESP depend on the ball's round shape rather
+   than its orange color. */
 let ballRadius=0.03;
 const ballCanvas=document.createElement('canvas');
 const ballCtx=ballCanvas.getContext('2d',{willReadFrequently:true});
-const BALL_SAMPLE_W=160;
-function isOrange(r,g,b){
- const max=Math.max(r,g,b), min=Math.min(r,g,b);
- if(max<60) return false;
- const d=max-min;
- if(d<25) return false;
- let h;
- if(max===r) h=60*(((g-b)/d)%6);
- else if(max===g) h=60*((b-r)/d+2);
- else h=60*((r-g)/d+4);
- if(h<0) h+=360;
- const sat=d/max;
- return h>=6 && h<=30 && sat>0.52 && max>75;
-}
+const BALL_SAMPLE_W=200;
 function detectBall(video, prevBall){
  if(!video.videoWidth) return null;
  const w=BALL_SAMPLE_W, h=Math.max(1,Math.round(BALL_SAMPLE_W*video.videoHeight/video.videoWidth));
@@ -239,43 +221,72 @@ function detectBall(video, prevBall){
  let data;
  try{ data=ballCtx.getImageData(0,0,w,h).data; }catch(e){ return null; }
 
- const n=w*h;
- const mask=new Uint8Array(n);
+ const n=w*h, gray=new Uint8Array(n), mask=new Uint8Array(n);
+ // Convert to grayscale: no hue/orange filtering.
  for(let i=0;i<n;i++){
-  const idx=i*4;
-  if(isOrange(data[idx],data[idx+1],data[idx+2])) mask[i]=1;
+  const k=i*4;
+  gray[i]=Math.round(data[k]*.299+data[k+1]*.587+data[k+2]*.114);
+ }
+ // Mark pixels that differ enough from their local 3x3 neighborhood.
+ // This is color-independent and gives the shape detector something to work with.
+ for(let py=1;py<h-1;py++){
+  for(let px=1;px<w-1;px++){
+   const i=py*w+px, g=gray[i];
+   let sum=0,count=0;
+   for(let yy=-1;yy<=1;yy++) for(let xx=-1;xx<=1;xx++){
+    if(xx===0&&yy===0) continue;
+    sum+=gray[i+yy*w+xx]; count++;
+   }
+   const avg=sum/count;
+   if(Math.abs(g-avg)>18) mask[i]=1;
+  }
+ }
+ // Fill small edge gaps inside compact regions so circle interiors can be measured.
+ for(let pass=0;pass<2;pass++){
+  const copy=mask.slice();
+  for(let py=1;py<h-1;py++) for(let px=1;px<w-1;px++){
+   const i=py*w+px;
+   let neighbors=0;
+   for(let yy=-1;yy<=1;yy++) for(let xx=-1;xx<=1;xx++) if(copy[i+yy*w+xx]) neighbors++;
+   if(neighbors>=5) mask[i]=1;
+  }
  }
 
- const visited=new Uint8Array(n);
- const stack=new Int32Array(n);
- let best=null, bestScore=-Infinity;
-
+ const visited=new Uint8Array(n), stack=new Int32Array(n);
+ let best=null,bestScore=-Infinity;
  for(let start=0;start<n;start++){
   if(!mask[start]||visited[start]) continue;
   let sp=0; stack[sp++]=start; visited[start]=1;
-  let count=0,sumX=0,sumY=0,minX=w,maxX=0,minY=h,maxY=0;
+  let count=0,sumX=0,sumY=0,minX=w,maxX=0,minY=h,maxY=0,perimeter=0;
   while(sp>0){
-   const p=stack[--sp];
-   const py=(p/w)|0, px=p-py*w;
-   count++; sumX+=px; sumY+=py;
-   if(px<minX)minX=px; if(px>maxX)maxX=px;
-   if(py<minY)minY=py; if(py>maxY)maxY=py;
-   if(px>0){const q=p-1; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
-   if(px<w-1){const q=p+1; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
-   if(py>0){const q=p-w; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
-   if(py<h-1){const q=p+w; if(mask[q]&&!visited[q]){visited[q]=1;stack[sp++]=q;}}
+   const q=stack[--sp], py=(q/w)|0, px=q-py*w;
+   count++;sumX+=px;sumY+=py;
+   if(px<minX)minX=px;if(px>maxX)maxX=px;if(py<minY)minY=py;if(py>maxY)maxY=py;
+   // 4-neighbor perimeter estimate.
+   if(px===0||!mask[q-1]) perimeter++;
+   if(px===w-1||!mask[q+1]) perimeter++;
+   if(py===0||!mask[q-w]) perimeter++;
+   if(py===h-1||!mask[q+w]) perimeter++;
+   if(px>0){const z=q-1;if(mask[z]&&!visited[z]){visited[z]=1;stack[sp++]=z;}}
+   if(px<w-1){const z=q+1;if(mask[z]&&!visited[z]){visited[z]=1;stack[sp++]=z;}}
+   if(py>0){const z=q-w;if(mask[z]&&!visited[z]){visited[z]=1;stack[sp++]=z;}}
+   if(py<h-1){const z=q+w;if(mask[z]&&!visited[z]){visited[z]=1;stack[sp++]=z;}}
   }
-  const bw=maxX-minX+1, bh=maxY-minY+1;
-  const fill=count/(bw*bh);
+  const bw=maxX-minX+1,bh=maxY-minY+1;
   const aspect=Math.max(bw,bh)/Math.max(1,Math.min(bw,bh));
-  if(count<Math.max(12,n*0.003)) continue;   // speck of noise
-  if(bw>w*0.6||bh>h*0.6) continue;           // too big to be just the ball
-  if(fill<0.45) continue;                    // hollow/irregular shape (fingers, edges)
-  if(aspect>1.9) continue;                   // too elongated to be round (arm/forearm)
-  const cx=(sumX/count)/w, cy=(sumY/count)/h;
-  let score=count*fill;
-  if(prevBall) score/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*8);
-  if(score>bestScore){ bestScore=score; best={x:cx,y:cy,r:Math.sqrt(count/Math.PI)/w}; }
+  const fill=count/(bw*bh);
+  // Grid-corrected circularity. A filled pixel circle is ~0.6 with a 4-edge perimeter.
+  const circularity=perimeter>0?(4*Math.PI*count)/(perimeter*perimeter):0;
+  if(count<18) continue;
+  if(bw>w*.45||bh>h*.45) continue;
+  if(bw<6||bh<6) continue;
+  if(aspect>1.18) continue;       // must be close to a perfect circle
+  if(fill<0.62) continue;         // compact/filled, not an arm or random edge
+  if(circularity<0.52) continue;  // strong roundness requirement
+  const cx=(sumX/count)/w,cy=(sumY/count)/h;
+  let score=circularity*fill*count;
+  if(prevBall) score/=(1+Math.hypot(cx-prevBall.x,cy-prevBall.y)*6);
+  if(score>bestScore){bestScore=score;best={x:cx,y:cy,r:Math.sqrt(count/Math.PI)/w};}
  }
  if(best) ballRadius=best.r;
  return best;
